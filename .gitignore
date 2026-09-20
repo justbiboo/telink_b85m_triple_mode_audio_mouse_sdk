@@ -1,0 +1,57 @@
+
+/8258_ble_sample/
+/8278_ble_sample/
+/825x_ble_remote/
+/827x_ble_sample/
+# 忽略8208_dual_mouse目录及其内容
+/8208_dual_mouse/
+/8208_ble_sample/
+/8208_dual_kb/
+/8208_ota_bootloader/
+# 若目录已被Git跟踪，需先执行: git rm -r --cached 8208_dual_mouse/
+/.vscode/
+/.patch/
+/.metadata/
+/user_files/
+# IDE配置文件
+.settings/
+.cproject
+.project
+
+# 编译生成文件
+*.o
+*.elf
+*.bin
+*.lst
+*.map
+*.hex
+
+# 构建系统文件
+objects.mk
+sources.mk
+subdir.mk
+
+# 可执行文件
+*.exe
+
+# 补丁文件
+#*.patch
+
+# 临时文件
+*.tmp
+*.temp
+
+# 日志文件
+*.log
+
+# 备份文件
+*.bak
+*~
+
+# Windows系统文件
+Thumbs.db
+.DS_Store
+
+# 脚本输出文件
+*.out
+*.err
