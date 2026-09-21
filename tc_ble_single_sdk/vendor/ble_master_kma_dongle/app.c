@@ -340,6 +340,11 @@ int main_idle_loop (void)
 
 	host_pair_unpair_proc();
 
+	#if (BIBOO_UX_ENABLE)
+	/*enable HID notify(CCC) after SMP&SDP done, must before first notify*/
+	host_enable_notify_proc();
+	#endif
+
 
 #if(BLE_MASTER_OTA_ENABLE)
 	proc_ota();
@@ -371,6 +376,15 @@ void main_loop(void)
 
 	#if (ACL_CENTRAL_SIMPLE_SDP_ENABLE)
 		simple_sdp_loop();
+	#endif
+
+	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	static u32 tick = 0;
+	if (clock_time_exceed(tick, 1000000))
+	{
+		tick = clock_time();
+		dbg_ble_status_print();
+	}
 	#endif
 }
 

@@ -963,10 +963,12 @@ void usb_handle_irq(void) {
 	}
 
 	#if(USB_MOUSE_ENABLE)
-		//extern void usbmouse_report_frame(void);
-		//extern void usbmouse_release_check(void);
-		//usbmouse_report_frame();
-		//usbmouse_release_check();
+	#if (BIBOO_UX_ENABLE) /*custom fix: forward BLE mouse report to USB*/
+		extern void usbmouse_report_frame(void);
+		extern void usbmouse_release_check(void);
+		usbmouse_report_frame();
+		usbmouse_release_check();
+	#endif
 	#endif
 
 	#if(USB_KEYBOARD_ENABLE)
@@ -975,7 +977,9 @@ void usb_handle_irq(void) {
 		//usbkb_report_frame();
 		//usbkb_release_check();
 	#endif
-	//usb_hid_report_fifo_proc();
+	#if (BIBOO_UX_ENABLE) /*custom fix: consume usb report fifo (mouse)*/
+	usb_hid_report_fifo_proc();
+	#endif
 }
 
 void usb_init_interrupt(void) {

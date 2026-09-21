@@ -354,16 +354,25 @@ static const u8 mouse_report_desc[] =
 	0x05, 0x01, 	 //  Usage Page (Generic Desktop Control)
 	0x09, 0x30,  // Usage (X)
 	0x09, 0x31,  // Usage (Y)
+#if (BIBOO_UX_ENABLE)
+/*custom fix: 8-bit X/Y, report = btn(1)+x(s8)+y(s8)+wheel(s8) = 4 bytes,
+  exactly the same as mouse_data_t and MOUSE_REPORT_DATA_LEN*/
+    0x15, 0x81, //  LOGICAL_MINIMUM(-127)
+    0x25, 0x7f, //  LOGICAL_MAXIMUM(127)
+    0x75, 0x08, //  Report Size (8)
+    0x95, 0x02, //  Report Count (2)
+#else
 #if (1)//(MOUSE_DATA_LEN_AAA==6)
-	0x16, 0x01, 0x80, //  LOGICAL_MINIMUM(0)
+	0x16, 0x01, 0x80, //  LOGICAL_MINIMUM(-32767)
 	0x26, 0xff, 0x7f,
 	0x75, 0x10, //	Report Size (16)
 	0x95, 0x02, //	Report Count (2)
 #else
-    0x15, 0x81, //  LOGICAL_MINIMUM(0)
-    0x25, 0x7f,
+    0x15, 0x81, //  LOGICAL_MINIMUM(-127)
+    0x25, 0x7f, //  LOGICAL_MAXIMUM(127)
     0x75, 0x08, //  Report Size (8)
     0x95, 0x02, //  Report Count (2)
+#endif
 #endif
 
 

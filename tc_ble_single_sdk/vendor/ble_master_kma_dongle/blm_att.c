@@ -63,8 +63,52 @@ extern void usbmouse_add_frame (mouse_data_t *packet_mouse, int packet_num);
  */
 void	att_mouse (u16 conn, u8 *p)
 {
-	(void)conn;(void)p;
+	(void)conn;
 #if (USB_MOUSE_ENABLE)
+#if (BIBOO_UX_ENABLE)
+	/*custom fix: mouse BLE report(8258_dual_mouse, MOUSE_DATA_LEN_AAA = 6):
+	 *  p[0]:btn, p[1..2]:x(s16, little-endian), p[3..4]:y(s16), p[5]:wheel
+	 *USB HID mouse report is 4 bytes(btn, s8 x, s8 y, s8 wheel),
+	 *  split big move into several frames when |x| or |y| > 127 */
+	mouse_data_t mouse_dat_report;
+	mouse_dat_report.btn = p[0];
+	mouse_dat_report.wheel = 0; /*wheel only attached to the last frame*/
+
+	s8 wheel = (s8)p[5];
+	s16 x = (s16)(p[1] | (p[2] << 8));
+	s16 y = (s16)(p[3] | (p[4] << 8));
+
+	while (x > 127)
+	{
+		mouse_dat_report.x = 127;  mouse_dat_report.y = 0;
+		usbmouse_add_frame(&mouse_dat_report, 1);
+		x -= 127;
+	}
+	while (x < -127)
+	{
+		mouse_dat_report.x = -127;  mouse_dat_report.y = 0;
+		usbmouse_add_frame(&mouse_dat_report, 1);
+		x += 127;
+	}
+	while (y > 127)
+	{
+		mouse_dat_report.x = 0;  mouse_dat_report.y = 127;
+		usbmouse_add_frame(&mouse_dat_report, 1);
+		y -= 127;
+	}
+	while (y < -127)
+	{
+		mouse_dat_report.x = 0;  mouse_dat_report.y = -127;
+		usbmouse_add_frame(&mouse_dat_report, 1);
+		y += 127;
+	}
+
+	mouse_dat_report.x = (s8)x;
+	mouse_dat_report.y = (s8)y;
+	mouse_dat_report.wheel = wheel; /*attach wheel to the last frame*/
+	usbmouse_add_frame(&mouse_dat_report, 1);
+#else
+	(void)p;
 	mouse_data_t mouse_dat_report;
 	mouse_dat_report.btn = *p++;
 	mouse_dat_report.x = *p++;
@@ -73,6 +117,7 @@ void	att_mouse (u16 conn, u8 *p)
 
 	extern void usbmouse_add_frame (mouse_data_t *packet_mouse, int packet_num);
 	usbmouse_add_frame(&mouse_dat_report, 1);
+#endif
 #endif
 
 }

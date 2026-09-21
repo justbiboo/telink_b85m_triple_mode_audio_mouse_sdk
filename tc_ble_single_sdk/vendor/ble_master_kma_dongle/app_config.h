@@ -25,6 +25,31 @@
 
 #include  "application/audio/audio_common.h"
 
+/* ================ BIBOO Custom UX: BLE Mouse Forward ================
+ * BIBOO_UX_ENABLE isolates all custom modifications vs. original Telink
+ * SDK for forwarding BLE mouse reports to USB (KMA dongle). Verified PASS.
+ *   1 : enable (BLE mouse report -> USB mouse forwarding works)
+ *   0 : original SDK behavior (mouse forward does NOT work)
+ * All custom code is wrapped by "BIBOO_UX_ENABLE", search it to
+ * locate every modified place:
+ *   - vendor/ble_master_kma_dongle/blm_host.c  : restore mouse notify branch;
+ *                                                CCC(0x2902) enable after SMP&SDP
+ *   - vendor/ble_master_kma_dongle/blm_att.c   : parse 6-byte BLE mouse report
+ *                                                (btn+s16x+s16y+wheel) -> 4-byte USB report
+ *   - application/usbstd/usb.c                 : restore usbmouse_report_frame()
+ *                                                /usbmouse_release_check()/fifo_proc calls
+ *   - application/app/usbmouse_i.h             : mouse HID descriptor uses 8-bit X/Y
+ *                                                (4-byte report, match mouse_data_t)
+ * =================================================================== */
+#ifndef BIBOO_UX_ENABLE
+#define BIBOO_UX_ENABLE			1
+#endif
+
+/* debug trace (prints "[DBG] ..." to UART): 0-off, 1-on */
+#ifndef BIBOO_UX_DEBUG
+#define BIBOO_UX_DEBUG		    1
+#endif
+
 
 
 /////////////////// MODULE /////////////////////////////////

@@ -61,4 +61,21 @@ extern int central_smp_pending;
 
 extern int central_pairing_enable;
 extern int central_unpair_enable;
+
+#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+/*debug: mouse link trace*/
+extern volatile u8  dbg_smp_done;
+extern volatile u8  dbg_sdp_pending;
+extern volatile u32 dbg_noti_cnt;
+extern volatile u32 dbg_mouse_cnt;
+extern volatile u16 dbg_last_noti_handle;
+void dbg_ble_status_print(void);
+#endif
+
+#if (BIBOO_UX_ENABLE)
+/**
+ * @brief      enable slave HID report notification by writing CCC after SDP done
+ */
+void host_enable_notify_proc(void);
+#endif
 #endif /* APP_HOST_H_ */

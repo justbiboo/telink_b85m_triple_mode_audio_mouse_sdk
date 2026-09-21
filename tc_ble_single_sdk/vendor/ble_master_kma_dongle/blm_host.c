@@ -59,6 +59,15 @@ int user_manual_pairing;
 int	central_pairing_enable = 0;
 int central_unpair_enable = 0;
 
+#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+/*debug: mouse link trace*/
+volatile u8  dbg_smp_done = 0;
+volatile u8  dbg_sdp_pending = 0;
+volatile u32 dbg_noti_cnt = 0;
+volatile u32 dbg_mouse_cnt = 0;
+volatile u16 dbg_last_noti_handle = 0xFFFF;
+#endif
+
 const u8 	telink_adv_trigger_pairing[] = {5, 0xFF, 0x11, 0x02, 0x01, 0x00};
 const u8 	telink_adv_trigger_unpair[] = {5, 0xFF, 0x11, 0x02, 0x01, 0x01};
 
@@ -114,6 +123,10 @@ int app_host_smp_finish (void)  //smp finish callback
 	#if (ACL_CENTRAL_SIMPLE_SDP_ENABLE)  //smp finish, start sdp
 		if(central_smp_pending)
 		{
+			#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+			dbg_smp_done = 1;
+			tlkapi_printf(APP_LOG_EN, "[DBG] SMP finish, start SDP\n");
+			#endif
 			//new slave device, should do service discovery again
 			if (cur_conn_device.mac_adrType != serviceDiscovery_adr_type || \
 				memcmp(cur_conn_device.mac_addr, serviceDiscovery_address, 6))
@@ -124,6 +137,9 @@ int app_host_smp_finish (void)  //smp finish callback
 			else
 			{
 				central_sdp_pending = 0;  //no need simple SDP
+				#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+				tlkapi_printf(APP_LOG_EN, "[DBG] same device, skip SDP\n");
+				#endif
 #if(TL_AUDIO_MODE == TL_AUDIO_DONGLE_ADPCM_GATT_GOOGLE)
 			#if (GOOGLE_VOICE_OVER_BLE_SPCE_VERSION == GOOGLE_VERSION_1_0)
 				u8 caps_data[6]={0};
@@ -272,6 +288,13 @@ int blm_le_connection_establish_event_handle(u8 *p)
 	hci_le_connectionCompleteEvt_t *pConnEvt = (hci_le_connectionCompleteEvt_t *)p;
 	if (pConnEvt->status == BLE_SUCCESS)	// status OK
 	{
+		#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+		tlkapi_printf(APP_LOG_EN, "[DBG] conn establish\n");
+		dbg_smp_done = 0;
+		dbg_noti_cnt = 0;
+		dbg_mouse_cnt = 0;
+		dbg_last_noti_handle = 0xFFFF;
+		#endif
 		#if (UI_LED_ENABLE)
 			//led show connection state
 			master_connected_led_on = 1;
@@ -576,6 +599,84 @@ void host_update_conn_proc(void)
 #endif
 
 
+#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+/**
+ * @brief      debug: print BLE mouse link status (called in main_loop, once per second)
+ */
+void dbg_ble_status_print(void)
+{
+	static u32 last_noti_cnt = 0;
+	if (blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
+	{
+		tlkapi_printf(APP_LOG_EN, "[DBG] no conn\n");
+		return;
+	}
+	tlkapi_printf(APP_LOG_EN, "[DBG] conn: smp=%d sdp_pend=%d H3=%x H4=%x H5=%x | noti=%d lastH=%x mouse=%d\n",
+		dbg_smp_done, central_sdp_pending,
+		conn_char_handler[3], conn_char_handler[4], conn_char_handler[5],
+		(int)dbg_noti_cnt, dbg_last_noti_handle, (int)dbg_mouse_cnt);
+	if (dbg_noti_cnt == last_noti_cnt && dbg_noti_cnt > 0)
+	{
+		/*notify count not increasing: slave notify blocked (check CCC on mouse side)*/
+		tlkapi_printf(APP_LOG_EN, "[DBG] noti stopped!\n");
+	}
+	last_noti_cnt = dbg_noti_cnt;
+}
+#endif
+
+#if (BIBOO_UX_ENABLE)
+/**
+ * @brief      enable slave HID report notification by writing CCC (0x2902) after SDP done.
+ *             mouse side bls_att_pushNotifyData checks CCC, without this no notify can be received.
+ */
+void host_enable_notify_proc(void)
+{
+	static u8 ccc_done = 0;
+
+	if(blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
+	{
+		ccc_done = 0;  //reset for next connection
+		return;
+	}
+	if(ccc_done || central_sdp_pending)  //already done, or SDP still ongoing
+	{
+		return;
+	}
+	#if (BLE_HOST_SMP_ENABLE)
+		if(central_smp_pending)  //SMP pairing still ongoing
+		{
+			return;
+		}
+	#endif
+	if(!conn_char_handler[3] || !conn_char_handler[4] || !conn_char_handler[5])
+	{
+		return;  //handle not ready (SDP failed or not started)
+	}
+
+	/*CCC handle = report value handle + 1 (ATT table: prop, value, CCC, report-ref)*/
+	u8 ccc[2] = {0x01, 0x00};
+	u8 fail = 0;
+	if(blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, HID_HANDLE_CONSUME_REPORT + 1, ccc, 2)){
+		fail = 1;
+	}
+	if(blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, HID_HANDLE_KEYBOARD_REPORT + 1, ccc, 2)){
+		fail = 1;
+	}
+	if(blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, HID_HANDLE_MOUSE_REPORT + 1, ccc, 2)){
+		fail = 1;
+	}
+
+	if(!fail)
+	{
+		ccc_done = 1;
+		#if (BIBOO_UX_DEBUG)
+		tlkapi_printf(APP_LOG_EN, "[DBG] CCC enabled (H3=%x H4=%x H5=%x)\n",
+			HID_HANDLE_CONSUME_REPORT, HID_HANDLE_KEYBOARD_REPORT, HID_HANDLE_MOUSE_REPORT);
+		#endif
+	}
+}
+#endif
+
 volatile int app_l2cap_handle_cnt = 0;
 
 /**
@@ -641,6 +742,10 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 		}
 		else if(pAtt->opcode == ATT_OP_HANDLE_VALUE_NOTI)  //slave handle notify
 		{
+			#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+			dbg_noti_cnt++;
+			dbg_last_noti_handle = attHandle;
+			#endif
 
 			if(attHandle == HID_HANDLE_CONSUME_REPORT)
 			{
@@ -783,10 +888,17 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 				att_keyboard (conn_handle, pAtt->dat);
 
 			}
-//			else if(HID_HANDLE_MOUSE_REPORT){
-//				static u32 app_mouse_dat;
-//				att_mouse(conn_handle,pAtt->dat);
-//			}
+			#if (BIBOO_UX_ENABLE) /*custom fix: forward mouse report to usb*/
+			else if(attHandle == HID_HANDLE_MOUSE_REPORT)
+			{
+				static u32 app_mouse_dat;
+				app_mouse_dat++;
+				#if (BIBOO_UX_DEBUG)
+				dbg_mouse_cnt++;
+				#endif
+				att_mouse(conn_handle, pAtt->dat);
+			}
+			#endif
 
 #if (TL_AUDIO_MODE == TL_AUDIO_DONGLE_ADPCM_GATT_TELINK)
 			else if(attHandle == AUDIO_HANDLE_MIC)

@@ -10,6 +10,9 @@
 /8208_ota_bootloader/
 # 若目录已被Git跟踪，需先执行: git rm -r --cached 8208_dual_mouse/
 /.vscode/
+/project/
+/825x_dual_mic_mouse/
+/825x_master_kma_dongle/
 /.patch/
 /.metadata/
 /user_files/
@@ -17,7 +20,7 @@
 .settings/
 .cproject
 .project
-
+makefile
 # 编译生成文件
 *.o
 *.elf
