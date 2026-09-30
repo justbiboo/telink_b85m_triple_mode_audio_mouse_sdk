@@ -138,6 +138,47 @@ static inline void no_printf(const char *format, ...){    return;}
 #define BIBOO_UX_SINE_TEST		0
 #endif
 
+/* ================ BIBOO UX: K4 = keyboard space key ================ */
+/* When enabled, the K4 button sends a keyboard HID space key (keycode 0x2C)
+ * press/release through the BLE HID keyboard report characteristic
+ * (HID_NORMAL_KB_REPORT_INPUT_DP_H). The dongle receives the notify
+ * (att_keyboard) and forwards it to the PC on its USB keyboard endpoint.
+ * Report format (8 bytes, kb_data_t): {cnt, ctrl_key, keycode[6]}.
+ * NOTE: this also DISABLES the K4 long-press multi-device channel switch
+ * (muti_device_change in AAA_Public.c): a >=3s space-key hold would
+ * otherwise fire it, disconnect the link and reboot onto another channel.
+ * Set to 0 to restore the original K4 channel-switch behavior. */
+#ifndef BIBOO_UX_K4_SPACE_KEY
+#define BIBOO_UX_K4_SPACE_KEY	1
+#endif
+
+/* ================ BIBOO UX: K4 push-to-talk mic ================ */
+/* When enabled, the K4 button works as a push-to-talk key:
+ *   press   -> start mic capture and stream mSBC voice to the dongle
+ *              (same start sequence as the original voice key:
+ *               audio_mic_param_init + audio_stick + ui_enable_mic(1))
+ *   release -> stop the mic (ui_enable_mic(0))
+ * The K5 voice-key toggle (press on / press again off) is kept unchanged;
+ * both entries can start/stop the mic. The 60s mic_duration safety limit
+ * still applies while held. */
+#ifndef BIBOO_UX_K4_MIC_PTT
+#define BIBOO_UX_K4_MIC_PTT		1
+#endif
+
+/* ================ BIBOO UX: K5 = Ctrl+Win push-to-talk ================ */
+/* When enabled, the K5 (voice) button becomes a push-to-talk key (like K4):
+ *   press   -> BLE keyboard report with Left-Ctrl + Left-Win modifiers
+ *              (ctrl_key byte 0x09, no normal keycode) AND start the mic
+ *              (audio_mic_param_init + audio_stick + ui_enable_mic(1))
+ *   release -> stop the mic, then (in strict order, so the PC never sees
+ *              Ctrl+Win+Enter): release modifiers -> Enter tap (0x28)
+ * The original K5 toggle behavior (press on / press again off, in
+ * voice_key_check) is bypassed in BLE mode; it is kept for 2.4G mode.
+ * The 60s mic_duration safety limit still applies while held. */
+#ifndef BIBOO_UX_K5_CTRL_WIN_MIC
+#define BIBOO_UX_K5_CTRL_WIN_MIC	1
+#endif
+
 
 //--------------Debug gpio-------------------
 

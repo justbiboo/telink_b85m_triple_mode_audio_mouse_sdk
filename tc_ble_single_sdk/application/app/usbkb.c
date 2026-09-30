@@ -89,6 +89,45 @@ void usbkb_report_frame(void)
 	return;
 }
 
+#if BIBOO_UX_ENABLE
+/*BIBOO UX fix: queue one keyboard report into usb_fifo. Used when the USB EP
+ * is busy OR the fifo still holds pending reports, so a new report can never
+ * jump ahead of queued ones (ordering) and a release report can never be
+ * swallowed by the not_released gating (stuck key on the PC). Mirrors the
+ * fifo branch of usbkb_hid_report_normal().*/
+static void usbkb_queue_report(int ctrl_key, u8 *keycode)
+{
+	u8 *pData = (u8 *)&usb_fifo[usb_ff_wptr++ & (USB_FIFO_NUM - 1)];
+	pData[0] = DAT_TYPE_KB;
+	pData[1] = ctrl_key;
+	memcpy(pData + 2, keycode, KEYBOARD_REPORT_KEY_MAX);
+
+	int fifo_use = (usb_ff_wptr - usb_ff_rptr) & (USB_FIFO_NUM*2-1);
+	if (fifo_use > USB_FIFO_NUM) {
+		usb_ff_rptr++;
+		//fifo overflow, overlap older data
+	}
+}
+#endif
+
+#if BIBOO_UX_ENABLE
+static void usbkb_release_normal_key(void){
+	if(usbkb_not_released & KB_NORMAL_RELEASE_MASK){
+		u8 normal_keycode[KEYBOARD_REPORT_KEY_MAX] = {0};
+		/*BIBOO UX fix: if reports are still pending in the fifo the release must
+		 * queue BEHIND them - writing it straight to the EP would jump the queue
+		 * and the PC could see release-then-press (stuck key). MASK stays set;
+		 * it is cleared by a later direct release (an extra all-zero report is
+		 * harmless for HID).*/
+		if(usb_ff_rptr != usb_ff_wptr){
+			usbkb_queue_report(0, normal_keycode);
+		}
+		else if(usbkb_hid_report_normal(0, normal_keycode)){
+			BM_CLR(usbkb_not_released, KB_NORMAL_RELEASE_MASK);
+		}
+	}
+}
+#else
 static void usbkb_release_normal_key(void){
 	if(usbkb_not_released & KB_NORMAL_RELEASE_MASK){
 		u8 normal_keycode[KEYBOARD_REPORT_KEY_MAX] = {0};
@@ -97,6 +136,7 @@ static void usbkb_release_normal_key(void){
 		}
 	}
 }
+#endif
 
 static void usbkb_release_sys_key(void){
 	if(usbkb_not_released & KB_SYS_RELEASE_MASK){
@@ -212,6 +252,29 @@ int usbkb_hid_report_normal(u8 ctrl_key, u8 *keycode){
 	return 1;
 }
 
+#if BIBOO_UX_ENABLE
+static inline void usbkb_report_normal_key(int ctrl_key, u8 *keycode, int cnt){
+	/*BIBOO UX fix: original code only set KB_NORMAL_RELEASE_MASK when the report
+	 * went straight to the EP (return 1). When the EP was busy the report was
+	 * queued into usb_fifo but the MASK stayed clear, so the following release
+	 * report was swallowed by the MASK gating in usbkb_release_normal_key() and
+	 * the key got stuck on the PC (seen as "randomly missing release" when a
+	 * press/release pair arrives while the EP is busy). Now: queue behind any
+	 * pending reports (never jump ahead) and ALWAYS set the MASK - a queued
+	 * press is still "not released".*/
+	if(cnt > 0 || ctrl_key){
+		if(usbhw_is_ep_busy(USB_EDP_KEYBOARD_IN) || (usb_ff_rptr != usb_ff_wptr)){
+			usbkb_queue_report(ctrl_key, keycode);
+		}
+		else{
+			usbkb_hid_report_normal(ctrl_key, keycode);
+		}
+		BM_SET(usbkb_not_released, KB_NORMAL_RELEASE_MASK);
+	}else{
+		usbkb_release_normal_key();
+	}
+}
+#else
 static inline void usbkb_report_normal_key(int ctrl_key, u8 *keycode, int cnt){
 	if(cnt > 0 || ctrl_key){
 		if(usbkb_hid_report_normal(ctrl_key, keycode)){
@@ -221,6 +284,7 @@ static inline void usbkb_report_normal_key(int ctrl_key, u8 *keycode, int cnt){
 		usbkb_release_normal_key();
 	}
 }
+#endif
 
 static inline void usbkb_report_sys_key(u8 ext_key){
 	if(ext_key >= VK_SYS_START && ext_key < VK_SYS_END){

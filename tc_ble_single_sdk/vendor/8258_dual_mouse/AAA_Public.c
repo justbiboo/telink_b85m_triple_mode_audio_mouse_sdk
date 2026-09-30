@@ -537,9 +537,17 @@ int mouse_connect()
 
 void voice_key_check(void)
 {
+#if (BIBOO_UX_K5_CTRL_WIN_MIC)
+	/*BIBOO UX: in BLE mode K5 is a push-to-talk key (press = Ctrl+Win modifiers
+	 * + mic on, release = modifiers released + mic off), handled by the edge
+	 * detector in button_process_telink_v21a(). Bypass the original toggle
+	 * logic here (press on / press again off); 2.4G mode keeps it unchanged.*/
+	if (fun_mode == RF_1M_BLE_MODE)
+	{
+		return;
+	}
+#endif
 
-
-	
 	if((last_btn_value == MS_BTN_VOICE) &&(btn_value != MS_BTN_VOICE) && ui_mic_enable){
 
 		ui_enable_mic(0);
@@ -786,6 +794,16 @@ void three_mode_change_handle()
  */
 void muti_device_change(u16 check_ms)
 {
+#if (BIBOO_UX_K4_SPACE_KEY)
+	/*BIBOO UX: K4 is repurposed as the keyboard space key (BIBOO_UX_K4_SPACE_KEY),
+	 * so the K4 long-press channel switch is DISABLED: a normal space-key hold
+	 * (>=3s, e.g. while the PC auto-repeats the space) would fire the switch,
+	 * disconnect the link and reboot the mouse onto the next channel
+	 * (deep_flag=MUTI_DEVICE_REBOOT_ANA_AAA, MAC changes, dongle can't reconnect).
+	 * Set BIBOO_UX_K4_SPACE_KEY to 0 in AAA_app_config.h to restore it.*/
+	(void)check_ms;
+	return;
+#else
 	static u32 key_press_hold_tick = 0;
 	static u32 key_release_hold_tick = 0;
 
@@ -816,7 +834,7 @@ void muti_device_change(u16 check_ms)
 						{
 							flash_dev_info.mast_id = 0;
 						}
-						
+
 					#if BLT_APP_LED_ENABLE
 				        dpi_led_set(flash_dev_info.mast_id + 1); //LED indicate
 					#endif
@@ -855,6 +873,7 @@ void muti_device_change(u16 check_ms)
 			key_press_hold_tick = clock_time(); //clear press count
 		}
 	}
+#endif
 }
 #endif
 
@@ -870,6 +889,118 @@ void button_process_telink_v21a(u8 event_new)
     {
 		printf("k5 press\n");
     }
+#endif
+#if (BIBOO_UX_K4_SPACE_KEY || BIBOO_UX_K4_MIC_PTT)
+	/*BIBOO UX: K4 edge actions (one shared edge detector on btn_value,
+	 * updated by the btn_get_value debounce; last_btn_value is only a
+	 * period snapshot and can not be used for reliable edge detection):
+	 *  - SPACE_KEY: press/release -> BLE keyboard report {cnt,ctrl,keycode[6]},
+	 *    press = keycode[0] 0x2C (space), release = all-zero report;
+	 *    dongle att_keyboard() forwards it to the PC on USB EP4.
+	 *  - MIC_PTT: press = start mic capture (same sequence as the original
+	 *    voice key: encoder reset + audio_stick + ui_enable_mic(1)),
+	 *    release = stop the mic (ui_enable_mic(0)).*/
+	{
+		static u8 bibo_k4_state = 0;
+		u8 bibo_k4_now = (btn_value & MS_BTN_K4) ? 1 : 0;
+		if (bibo_k4_now != bibo_k4_state)
+		{
+			bibo_k4_state = bibo_k4_now;
+			if ((fun_mode == RF_1M_BLE_MODE) && (blc_ll_getCurrentState() == BLS_LINK_STATE_CONN))
+			{
+#if (BIBOO_UX_K4_MIC_PTT)
+				if (bibo_k4_now)
+				{
+					audio_mic_param_init();			//reset mSBC encoder state
+					audio_stick = clock_time() | 1;	//arm proc_audio_ble (17ms warm-up)
+					ui_enable_mic(1);				//start AMIC capture & voice stream
+					printf("bibo ptt on\n");
+				}
+				else
+				{
+					ui_enable_mic(0);				//stop AMIC, close the voice stream
+					printf("bibo ptt off\n");
+				}
+#endif
+#if (BIBOO_UX_K4_SPACE_KEY)
+				u8 bibo_kb_rpt[8] = {0};
+				if (bibo_k4_now)
+				{
+					bibo_kb_rpt[2] = 0x2C;	//HID keycode: Space
+				}
+				bls_att_pushNotifyData (HID_NORMAL_KB_REPORT_INPUT_DP_H, bibo_kb_rpt, 8);
+				printf ("bibo kb space %d\n", bibo_k4_now);
+#endif
+			}
+		}
+	}
+#endif
+#if (BIBOO_UX_K5_CTRL_WIN_MIC)
+	/*BIBOO UX: K5 (voice btn) push-to-talk with Ctrl+Win modifiers + Enter tail:
+	 * press   -> BLE keyboard report {cnt,ctrl_key,keycode[6]} with
+	 *            ctrl_key = 0x09 (Left-Ctrl 0x01 | Left-Win 0x08), no
+	 *            normal keycode, AND start mic capture (PTT);
+	 * release -> stop the mic, then a 3-report tail (one per loop call,
+	 *            retried until the BLE TX FIFO accepts it - voice frames
+	 *            may still be draining right after mic off):
+	 *              1. all-zero report (release Ctrl+Win on the PC)
+	 *              2. Enter press      (keycode 0x28)
+	 *              3. all-zero report  (Enter released)
+	 *            Strict order matters: Enter must NEVER be seen while the
+	 *            modifiers are still down (Ctrl+Win+Enter = Windows Narrator).*/
+	{
+		static u8 bibo_k5_state = 0;
+		static u8 bibo_k5_tail = 0;	//release tail: 0 idle, 1..3 pending reports
+		u8 bibo_k5_now = (btn_value & MS_BTN_VOICE) ? 1 : 0;
+		if (bibo_k5_now != bibo_k5_state)
+		{
+			bibo_k5_state = bibo_k5_now;
+			if ((fun_mode == RF_1M_BLE_MODE) && (blc_ll_getCurrentState() == BLS_LINK_STATE_CONN))
+			{
+				u8 bibo_kb_rpt[8] = {0};
+				if (bibo_k5_now)
+				{
+					bibo_k5_tail = 0;	//cancel pending tail (report below clears any stuck key)
+					bibo_kb_rpt[1] = 0x09;	//modifiers: Left-Ctrl(0x01) | Left-Win(0x08)
+					audio_mic_param_init();			//reset mSBC encoder state
+					audio_stick = clock_time() | 1;	//arm proc_audio_ble (17ms warm-up)
+					ui_enable_mic(1);				//start AMIC capture & voice stream
+					bls_att_pushNotifyData (HID_NORMAL_KB_REPORT_INPUT_DP_H, bibo_kb_rpt, 8);
+					printf("bibo k5 ptt on\n");
+				}
+				else
+				{
+					ui_enable_mic(0);				//stop AMIC, close the voice stream
+					bibo_k5_tail = 1;				//arm release tail: mods off -> Enter -> release
+					printf("bibo k5 ptt off\n");
+				}
+			}
+		}
+		if (bibo_k5_tail)
+		{
+			if ((fun_mode == RF_1M_BLE_MODE) && (blc_ll_getCurrentState() == BLS_LINK_STATE_CONN))
+			{
+				u8 bibo_kb_rpt[8] = {0};
+				if (bibo_k5_tail == 2)
+				{
+					bibo_kb_rpt[2] = 0x28;	//HID keycode: Enter
+				}
+				if (bls_att_pushNotifyData (HID_NORMAL_KB_REPORT_INPUT_DP_H, bibo_kb_rpt, 8) == BLE_SUCCESS)
+				{
+					bibo_k5_tail ++;
+					if (bibo_k5_tail > 3)
+					{
+						bibo_k5_tail = 0;	//tail done (Enter tap delivered)
+						printf("bibo k5 enter\n");
+					}
+				}
+			}
+			else
+			{
+				bibo_k5_tail = 0;	//link gone: drop the tail
+			}
+		}
+	}
 #endif
 #if SENSOR_FUN_ENABLE_AAA
 		/* Switch optical sensor DPI */
