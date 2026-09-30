@@ -59,6 +59,12 @@ int user_manual_pairing;
 int	central_pairing_enable = 0;
 int central_unpair_enable = 0;
 
+#if (BIBOO_UX_ENABLE)
+/*BIBOO custom: voice stream from mouse (my_Data characteristic, uuid16 0xB03E @ service 0xFFF0)*/
+#define BIBO_APP_DATA_IN_UUID   0xB03E
+u16 bibo_voice_att_handle = 0;   //voice characteristic value handle, found in SDP callback
+#endif
+
 #if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
 /*debug: mouse link trace*/
 volatile u8  dbg_smp_done = 0;
@@ -66,6 +72,27 @@ volatile u8  dbg_sdp_pending = 0;
 volatile u32 dbg_noti_cnt = 0;
 volatile u32 dbg_mouse_cnt = 0;
 volatile u16 dbg_last_noti_handle = 0xFFFF;
+volatile u32 dbg_voice_rx_cnt = 0;
+volatile u16 dbg_vlen_last = 0;
+volatile u32 dbg_sdkloop_us_max = 0;
+volatile u32 dbg_sdkloop_us = 0;
+volatile u32 dbg_usbhs_us = 0;
+volatile u32 dbg_btisr_acc = 0;
+volatile u32 dbg_usbisr_acc = 0;
+volatile u32 dbg_usbhs_us_max = 0;
+extern volatile u32 dbg_vbuf_cnt;
+extern volatile u32 dbg_vdec_cnt;
+extern volatile u32 dbg_vwr_len;
+extern volatile u32 dbg_visr_cnt;
+extern volatile u32 dbg_vusb_cnt;
+extern volatile u32 dbg_vcall_cnt;
+extern volatile u32 dbg_vdec_us;
+extern volatile u32 dbg_vdec_us_max;
+extern volatile u32 dbg_rsta_cnt;
+extern volatile u32 dbg_rstb_cnt;
+extern volatile u32 dbg_rstblk_cnt;
+extern volatile u32 dbg_vskp_cnt;
+extern volatile u32 dbg_loop_cnt;
 #endif
 
 const u8 	telink_adv_trigger_pairing[] = {5, 0xFF, 0x11, 0x02, 0x01, 0x00};
@@ -611,10 +638,14 @@ void dbg_ble_status_print(void)
 		tlkapi_printf(APP_LOG_EN, "[DBG] no conn\n");
 		return;
 	}
-	tlkapi_printf(APP_LOG_EN, "[DBG] conn: smp=%d sdp_pend=%d H3=%x H4=%x H5=%x | noti=%d lastH=%x mouse=%d\n",
+	tlkapi_printf(APP_LOG_EN, "[DBG] conn: smp=%d sdp_pend=%d H3=%x H4=%x H5=%x | noti=%d lastH=%x mouse=%d | vH=%x vrx=%d vlen=%d vbuf=%d vdec=%d vwr=%d visr=%d vusb=%d vcall=%d vdus=%d vdusmax=%d rsta=%d rstb=%d rstblk=%d sdkus=%d usbus=%d sdkusL=%d usbusL=%d btisr=%d usbisr=%d vskp=%d loop=%d\n",
 		dbg_smp_done, central_sdp_pending,
 		conn_char_handler[3], conn_char_handler[4], conn_char_handler[5],
-		(int)dbg_noti_cnt, dbg_last_noti_handle, (int)dbg_mouse_cnt);
+		(int)dbg_noti_cnt, dbg_last_noti_handle, (int)dbg_mouse_cnt,
+		bibo_voice_att_handle, (int)dbg_voice_rx_cnt,
+		dbg_vlen_last, (int)dbg_vbuf_cnt, (int)dbg_vdec_cnt, (int)dbg_vwr_len, (int)dbg_visr_cnt, (int)dbg_vusb_cnt,
+		(int)dbg_vcall_cnt, (int)dbg_vdec_us, (int)dbg_vdec_us_max, (int)dbg_rsta_cnt, (int)dbg_rstb_cnt, (int)dbg_rstblk_cnt,
+		(int)dbg_sdkloop_us_max, (int)dbg_usbhs_us_max, (int)dbg_sdkloop_us, (int)dbg_usbhs_us, (int)dbg_btisr_acc, (int)dbg_usbisr_acc, (int)dbg_vskp_cnt, (int)dbg_loop_cnt);
 	if (dbg_noti_cnt == last_noti_cnt && dbg_noti_cnt > 0)
 	{
 		/*notify count not increasing: slave notify blocked (check CCC on mouse side)*/
@@ -626,19 +657,35 @@ void dbg_ble_status_print(void)
 
 #if (BIBOO_UX_ENABLE)
 /**
+ * @brief      SDP callback: find mouse voice stream characteristic (my_Data, uuid16 0xB03E)
+ *             value handle, so that notifications can be routed and CCC subscribed.
+ */
+void bibo_sdp_get_handle_cb(att_db_uuid16_t *p16, att_db_uuid128_t *p128)
+{
+	(void)p128;
+	bibo_voice_att_handle = blm_att_findHandleOfUuid16(p16, BIBO_APP_DATA_IN_UUID, 0);
+	#if (BIBOO_UX_DEBUG)
+	tlkapi_printf(APP_LOG_EN, "[DBG] BIBOO voice handle=%x\n", bibo_voice_att_handle);
+	#endif
+}
+
+/**
  * @brief      enable slave HID report notification by writing CCC (0x2902) after SDP done.
  *             mouse side bls_att_pushNotifyData checks CCC, without this no notify can be received.
+ *             BIBOO: also subscribe mouse voice characteristic (my_Data 0xB03E) for voice stream.
  */
 void host_enable_notify_proc(void)
 {
 	static u8 ccc_done = 0;
+	static u8 voice_ccc_done = 0;
 
 	if(blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
 	{
 		ccc_done = 0;  //reset for next connection
+		voice_ccc_done = 0;
 		return;
 	}
-	if(ccc_done || central_sdp_pending)  //already done, or SDP still ongoing
+	if(central_sdp_pending)  //SDP still ongoing
 	{
 		return;
 	}
@@ -648,6 +695,24 @@ void host_enable_notify_proc(void)
 			return;
 		}
 	#endif
+
+	/*BIBOO: subscribe voice notify (CCC handle = voice value handle + 1)*/
+	if(!voice_ccc_done && bibo_voice_att_handle)
+	{
+		u8 vccc[2] = {0x01, 0x00};
+		if(!blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, bibo_voice_att_handle + 1, vccc, 2))
+		{
+			voice_ccc_done = 1;
+			#if (BIBOO_UX_DEBUG)
+			tlkapi_printf(APP_LOG_EN, "[DBG] BIBOO voice CCC written (h=%x)\n", bibo_voice_att_handle + 1);
+			#endif
+		}
+	}
+
+	if(ccc_done)  //HID CCC already done
+	{
+		return;
+	}
 	if(!conn_char_handler[3] || !conn_char_handler[4] || !conn_char_handler[5])
 	{
 		return;  //handle not ready (SDP failed or not started)
@@ -989,6 +1054,16 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 					google_voice_model = pAtt->dat[4];
 
 				}
+			}
+#endif
+#if (BIBOO_UX_ENABLE) /*BIBOO custom: route mouse voice stream notify (my_Data 0xB03E)*/
+			else if(bibo_voice_att_handle && attHandle == bibo_voice_att_handle)
+			{
+				#if (BIBOO_UX_DEBUG)
+				dbg_voice_rx_cnt++;
+				dbg_vlen_last = (u16)(pAtt->l2capLen - 3);
+				#endif
+				bibo_att_mic ((u16)(pAtt->l2capLen - 3), pAtt->dat);
 			}
 #endif
 			else

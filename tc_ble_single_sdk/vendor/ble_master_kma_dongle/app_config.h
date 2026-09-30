@@ -45,6 +45,18 @@
 #define BIBOO_UX_ENABLE			1
 #endif
 
+/* USB test case: 1kHz sine test tone on the dongle USB microphone.
+ * While a PC app captures audio (host polls USB ISO IN EP7 every 1ms),
+ * EP7 outputs a 1kHz sine wave (16K/16bit mono PCM, one full 1kHz period
+ * per 1ms ISOC packet) instead of the BLE mouse voice stream. No BLE mouse
+ * needed; use it to verify the dongle -> PC USB audio path.
+ *   1 : enable test tone
+ *   0 : normal behavior (BLE mouse voice stream)
+ */
+#ifndef BIBOO_UX_SINE_TEST
+#define BIBOO_UX_SINE_TEST		0
+#endif
+
 /* debug trace (prints "[DBG] ..." to UART): 0-off, 1-on */
 #ifndef BIBOO_UX_DEBUG
 #define BIBOO_UX_DEBUG		    1
@@ -188,7 +200,9 @@
 
 
 ///////////////////////// System Clock  Configuration /////////////////////////////////////////
-#if (TL_AUDIO_MODE & (TL_AUDIO_MASK_SBC_MODE|TL_AUDIO_MASK_MSBC_MODE))
+/*BIBOO: the custom mSBC voice decode chain needs SBC-class CPU headroom (the same rule the
+ * SDK itself applies to its SBC/MSBC audio modes), so force 48MHz when BIBOO_UX_ENABLE */
+#if ((TL_AUDIO_MODE & (TL_AUDIO_MASK_SBC_MODE|TL_AUDIO_MASK_MSBC_MODE)) || (BIBOO_UX_ENABLE))
 #define CLOCK_SYS_CLOCK_HZ  								48000000
 #else
 #define CLOCK_SYS_CLOCK_HZ  								32000000

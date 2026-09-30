@@ -36,12 +36,26 @@
  */
 _attribute_ram_code_ void irq_handler(void)
 {
-	irq_blt_sdk_handler();
+	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+		extern volatile u32 dbg_btisr_acc;
+		extern volatile u32 dbg_usbisr_acc;
+		u32 _isr_t0 = clock_time ();
+	#endif
+		irq_blt_sdk_handler();
+	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+		dbg_btisr_acc += clock_time () - _isr_t0;
+	#endif
 
 
 #if (UI_AUDIO_ENABLE)
 	if(reg_irq_src & FLD_IRQ_IRQ4_EN){
-		usb_endpoints_irq_handler();
+		#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+				u32 _isr_t1 = clock_time ();
+		#endif
+				usb_endpoints_irq_handler();
+		#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+				dbg_usbisr_acc += clock_time () - _isr_t1;
+		#endif
 	}
 #endif
 

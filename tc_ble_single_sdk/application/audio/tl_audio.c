@@ -620,6 +620,24 @@ void	proc_mic_encoder (void)
 
 		// step4: Soft HPF, NONE need
 #endif
+#if (BIBOO_UX_SINE_TEST)
+		/* BIBOO test: overwrite mic samples with a continuous 1kHz sine wave
+		 * (16kHz sample rate -> 16-sample period). The mSBC encoder then
+		 * produces a stable tone sent to the dongle via GATT notify. */
+		{
+			static s16 bibo_sine_lut[16] =
+			{
+				0,  3135,  5793,  7568,  8192,  7568,  5793,  3135,
+				0, -3135, -5793, -7568, -8192, -7568, -5793, -3135
+			};
+			static u16 bibo_sine_phase = 0;	//persist across frames to keep phase continuous
+			for (int i = 0; i < MIC_SHORT_DEC_SIZE; i++)
+			{
+				ps[i] = bibo_sine_lut[bibo_sine_phase & 0x0f];
+				bibo_sine_phase++;
+			}
+		}
+#endif
 		sbc_enc((u8 *)ps, MIC_SHORT_DEC_SIZE << 1, out, ADPCM_PACKET_LEN, (u32*)Temp_out_len);
 
 		buffer_mic_rptr = buffer_mic_rptr ? 0 : (TL_MIC_BUFFER_SIZE>>2);

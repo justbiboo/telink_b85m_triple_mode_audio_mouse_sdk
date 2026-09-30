@@ -69,6 +69,10 @@ extern volatile u8  dbg_sdp_pending;
 extern volatile u32 dbg_noti_cnt;
 extern volatile u32 dbg_mouse_cnt;
 extern volatile u16 dbg_last_noti_handle;
+extern volatile u32 dbg_sdkloop_us_max;
+extern volatile u32 dbg_usbhs_us_max;
+extern volatile u32 dbg_sdkloop_us;
+extern volatile u32 dbg_usbhs_us;
 void dbg_ble_status_print(void);
 #endif
 
@@ -77,5 +81,10 @@ void dbg_ble_status_print(void);
  * @brief      enable slave HID report notification by writing CCC after SDP done
  */
 void host_enable_notify_proc(void);
+
+/**
+ * @brief      SDP callback: find mouse voice stream characteristic handle (my_Data, uuid16 0xB03E)
+ */
+void bibo_sdp_get_handle_cb(att_db_uuid16_t *p16, att_db_uuid128_t *p128);
 #endif
 #endif /* APP_HOST_H_ */

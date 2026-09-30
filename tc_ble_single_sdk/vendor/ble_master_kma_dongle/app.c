@@ -234,6 +234,11 @@ void user_init(void)
 		#if(TL_AUDIO_MODE == TL_AUDIO_DONGLE_ADPCM_GATT_GOOGLE)
 			app_sdp_register_get_att_handle_callback(&app_google_voice_service_discovery);
 		#endif
+	
+		#if (BIBOO_UX_ENABLE && (TL_AUDIO_MODE != TL_AUDIO_DONGLE_ADPCM_GATT_GOOGLE))
+			/*BIBOO custom: find mouse voice stream characteristic (my_Data, uuid16 0xB03E) after SDP*/
+			app_sdp_register_get_att_handle_callback(&bibo_sdp_get_handle_cb);
+		#endif
 	#endif
 
 
@@ -298,13 +303,30 @@ void host_pair_unpair_proc(void)
 int main_idle_loop (void)
 {
 
-
+	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	u32 _dbg_t0 = clock_time ();
+	#endif
 	////////////////////////////////////// BLE entry /////////////////////////////////
 	blt_sdk_main_loop();
 
+	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	u32 _dbg_t1 = clock_time ();
+	#endif
 
 	///////////////////////////////////// proc usb cmd from host /////////////////////
 	usb_handle_irq();
+
+	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	{
+		u32 _dbg_t2 = clock_time ();
+		u32 _dbg_dt = _dbg_t1 - _dbg_t0;
+		dbg_sdkloop_us = _dbg_dt;
+		if (_dbg_dt > dbg_sdkloop_us_max) { dbg_sdkloop_us_max = _dbg_dt; }
+		_dbg_dt = _dbg_t2 - _dbg_t1;
+		dbg_usbhs_us = _dbg_dt;
+		if (_dbg_dt > dbg_usbhs_us_max) { dbg_usbhs_us_max = _dbg_dt; }
+	}
+	#endif
 
 
 	////////////////////////////////////// UI entry /////////////////////////////////
@@ -379,7 +401,9 @@ void main_loop(void)
 	#endif
 
 	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	extern volatile u32 dbg_loop_cnt;
 	static u32 tick = 0;
+	dbg_loop_cnt ++;
 	if (clock_time_exceed(tick, 1000000))
 	{
 		tick = clock_time();

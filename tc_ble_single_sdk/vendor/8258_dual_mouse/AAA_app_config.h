@@ -119,6 +119,25 @@ static inline void no_printf(const char *format, ...){    return;}
 #include "vendor/8258_dual_mouse/AAA_app_config_Telink_QFN32.h"
 #endif
 
+/* ================ BIBOO UX: BLE mouse continuous mic stream ================ */
+/* BIBOO_UX_MIC_STREAM: after BLE link-up with the dongle, the mouse automatically
+ * opens the AMIC and streams REAL microphone audio (16kHz/16bit/mono) as mSBC
+ * 57B frames (7.5ms) via GATT notify (my_Data 0xB03E). The dongle decodes them
+ * and outputs the sound on USB.
+ *   1 : enable automatic wireless mic stream
+ *   0 : original SDK behavior (voice key K5 push-to-talk starts/stops the mic)
+ *
+ * BIBOO_UX_SINE_TEST: DEBUG option of the stream above - the mic samples are
+ * replaced by a continuous 1kHz sine tone (end-to-end chain sanity check).
+ *   0 : normal (real microphone audio)
+ *   1 : 1kHz test tone */
+#ifndef BIBOO_UX_MIC_STREAM
+#define BIBOO_UX_MIC_STREAM		0
+#endif
+#ifndef BIBOO_UX_SINE_TEST
+#define BIBOO_UX_SINE_TEST		0
+#endif
+
 
 //--------------Debug gpio-------------------
 
