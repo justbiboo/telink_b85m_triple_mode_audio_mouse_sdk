@@ -60,6 +60,23 @@ int	central_pairing_enable = 0;
 int central_unpair_enable = 0;
 
 #if (BIBOO_UX_ENABLE)
+/*BIBOO custom: auto pairing mode.
+ * - set to 1 at power-on (app.c user_init) and after every link loss
+ *   (blm_disconnect_event_handle), so the dongle searches the mouse and
+ *   pairs/connects automatically without pressing any button.
+ * - while set, only the mouse ADV signature is accepted (see
+ *   blm_le_adv_report_event_handle) to avoid connecting to unrelated
+ *   nearby BLE devices.
+ * - cleared by the unpair procedure (see app.c host_pair_unpair_proc) so
+ *   the just-unpaired mouse is not immediately re-connected; it is set
+ *   again on next power-on or on the next non-unpair link loss.*/
+int central_auto_pairing_enable = 0;
+/*one-shot: set when unpair triggers the disconnect, consumed in
+ *blm_disconnect_event_handle to suppress auto pairing for that disconnect*/
+int bibo_unpair_no_repair = 0;
+#endif
+
+#if (BIBOO_UX_ENABLE)
 /*BIBOO custom: voice stream from mouse (my_Data characteristic, uuid16 0xB03E @ service 0xFFF0)*/
 #define BIBO_APP_DATA_IN_UUID   0xB03E
 u16 bibo_voice_att_handle = 0;   //voice characteristic value handle, found in SDP callback
@@ -236,6 +253,28 @@ int blm_le_adv_report_event_handle(u8 *p)
 
 	//manual pairing methods 1: button triggers
 	user_manual_pairing = central_pairing_enable && (rssi > -56);  //button trigger pairing(rssi threshold, short distance)
+
+	#if (BIBOO_UX_ENABLE)
+	/*BIBOO custom: auto pairing trigger (power-on / after link loss, no button).
+	 *accept only the mouse ADV signature to avoid connecting to unrelated
+	 *nearby BLE devices. two fixed layouts on mouse side:
+	 *  - MS swift-pair layout : [3]=len3 [4]=0x19(Appearance) [5..6]=0xC2,0x03 (0x03C2 mouse)
+	 *  - plain layout         : [3]=len3 [4]=0x03(UUID16 list) [5..6]=0x12,0x18 (0x1812 HID)*/
+	if(!user_manual_pairing && central_auto_pairing_enable && (rssi > -56))
+	{
+		if(pa->len >= 7)
+		{
+			if((pa->data[3] == 0x03) && (pa->data[4] == 0x19) && (pa->data[5] == 0xC2) && (pa->data[6] == 0x03))
+			{
+				user_manual_pairing = 1;  //Appearance = 0x03C2 (mouse)
+			}
+			else if((pa->data[3] == 0x03) && (pa->data[4] == 0x03) && (pa->data[5] == 0x12) && (pa->data[6] == 0x18))
+			{
+				user_manual_pairing = 1;  //uuid16 list contains 0x1812 (HID service)
+			}
+		}
+	}
+	#endif
 
 	//manual pairing methods 2: special pairing ADV data
 	if(!user_manual_pairing){  //special ADV pair data can also trigger pairing
@@ -444,6 +483,30 @@ int 	blm_disconnect_event_handle(u8 *p)
 	blc_ll_setScanParameter(SCAN_TYPE_PASSIVE, SCAN_INTERVAL_100MS, SCAN_INTERVAL_100MS,
 							OWN_ADDRESS_PUBLIC, SCAN_FP_ALLOW_ADV_ANY);
 	blc_ll_setScanEnable (BLC_SCAN_ENABLE, DUP_FILTER_DISABLE);
+
+	#if (BIBOO_UX_ENABLE)
+	/*BIBOO custom: link lost -> re-enter pairing mode automatically, so the mouse
+	 *can be found and re-connected/re-paired without pressing any button.
+	 *exception: if this disconnect was triggered by the unpair procedure, stay
+	 *out of auto pairing (otherwise the just-unpaired mouse would be re-connected
+	 *immediately); auto pairing comes back on next power-on or next normal
+	 *link loss.*/
+	if(bibo_unpair_no_repair)
+	{
+		bibo_unpair_no_repair = 0;
+		central_auto_pairing_enable = 0;
+		#if (BIBOO_UX_DEBUG)
+		tlkapi_printf(APP_LOG_EN, "[DBG] disconnect by unpair, auto pairing suppressed\n");
+		#endif
+	}
+	else
+	{
+		central_auto_pairing_enable = 1;
+		#if (BIBOO_UX_DEBUG)
+		tlkapi_printf(APP_LOG_EN, "[DBG] link lost (r=%x), enter auto pairing\n", pDisConn->reason);
+		#endif
+	}
+	#endif
 
 
 	return 0;

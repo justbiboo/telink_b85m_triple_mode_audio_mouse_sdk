@@ -62,6 +62,13 @@ extern int central_smp_pending;
 extern int central_pairing_enable;
 extern int central_unpair_enable;
 
+#if (BIBOO_UX_ENABLE)
+/*BIBOO custom: auto pairing mode (set at power-on / after link loss, no button needed)*/
+extern int central_auto_pairing_enable;
+/*BIBOO custom: one-shot flag, suppress auto pairing for the disconnect caused by unpair*/
+extern int bibo_unpair_no_repair;
+#endif
+
 #if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
 /*debug: mouse link trace*/
 extern volatile u8  dbg_smp_done;

@@ -247,6 +247,13 @@ void user_init(void)
 							OWN_ADDRESS_PUBLIC, SCAN_FP_ALLOW_ADV_ANY);
 	blc_ll_setScanEnable (BLC_SCAN_ENABLE, DUP_FILTER_DISABLE);
 
+	#if (BIBOO_UX_ENABLE)
+	/*BIBOO custom: power-on -> enter auto pairing mode automatically: once the mouse
+	 *(in pairing/adv mode) is scanned, dongle connects & pairs it without button.
+	 *see blm_le_adv_report_event_handle() in blm_host.c*/
+	central_auto_pairing_enable = 1;
+	#endif
+
 	/* Check if any Stack(Controller & Host) Initialization error after all BLE initialization done.
 	 * attention that code will stuck in "while(1)" if any error detected in initialization, user need find what error happens and then fix it */
 	blc_app_checkControllerHostInitialization();
@@ -279,6 +286,13 @@ void host_pair_unpair_proc(void)
 			if( blm_ll_disconnect(cur_conn_device.conn_handle, HCI_ERR_REMOTE_USER_TERM_CONN) == BLE_SUCCESS){
 				master_disconnect_flag = 1;
 				central_unpair_enable = 0;
+
+				#if (BIBOO_UX_ENABLE)
+				/*BIBOO custom: mark this disconnect as "caused by unpair" so that
+				 *blm_disconnect_event_handle() suppresses auto pairing and the
+				 *just-unpaired mouse is not immediately re-connected*/
+				bibo_unpair_no_repair = 1;
+				#endif
 
 				#if (BLE_HOST_SMP_ENABLE)
 					tbl_bond_slave_unpair_proc(cur_conn_device.mac_adrType, cur_conn_device.mac_addr); //by telink stack host smp
