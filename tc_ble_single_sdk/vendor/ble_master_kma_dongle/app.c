@@ -33,6 +33,7 @@
 #include "application/audio/audio_config.h"
 #include "application/usbstd/usb.h"
 #include "app_audio.h"
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module entry (see vendor/user/user_module_manage.c)*/
 
 
 #if (TL_AUDIO_MODE == TL_AUDIO_DONGLE_ADPCM_GATT_GOOGLE) && (GOOGLE_VOICE_OVER_BLE_SPCE_VERSION == GOOGLE_VERSION_1_0)
@@ -235,10 +236,8 @@ void user_init(void)
 			app_sdp_register_get_att_handle_callback(&app_google_voice_service_discovery);
 		#endif
 	
-		#if (BIBOO_UX_ENABLE && (TL_AUDIO_MODE != TL_AUDIO_DONGLE_ADPCM_GATT_GOOGLE))
-			/*BIBOO custom: find mouse voice stream characteristic (my_Data, uuid16 0xB03E) after SDP*/
-			app_sdp_register_get_att_handle_callback(&bibo_sdp_get_handle_cb);
-		#endif
+		/*BIBOO UX: voice stream characteristic SDP callback is registered inside
+		 *ux_voice_dec_init() (called from user_module_init()), see vendor/user/voice_dec*/
 	#endif
 
 
@@ -247,11 +246,13 @@ void user_init(void)
 							OWN_ADDRESS_PUBLIC, SCAN_FP_ALLOW_ADV_ANY);
 	blc_ll_setScanEnable (BLC_SCAN_ENABLE, DUP_FILTER_DISABLE);
 
-	#if (BIBOO_UX_ENABLE)
-	/*BIBOO custom: power-on -> enter auto pairing mode automatically: once the mouse
-	 *(in pairing/adv mode) is scanned, dongle connects & pairs it without button.
-	 *see blm_le_adv_report_event_handle() in blm_host.c*/
-	central_auto_pairing_enable = 1;
+	/*BIBOO UX: power-on auto pairing is enabled in ux_mouse_fwd_init()
+	 *(called from user_module_init()), see vendor/user/mouse_fwd*/
+
+	#if (BIBOO_UX_USER_MODULE)
+	/*BIBOO UX: init all vendor/user modules (currently none enabled on the dongle
+	 * side; the entry is wired here so future dongle UX modules need no app.c change)*/
+	user_module_init();
 	#endif
 
 	/* Check if any Stack(Controller & Host) Initialization error after all BLE initialization done.
@@ -287,11 +288,8 @@ void host_pair_unpair_proc(void)
 				master_disconnect_flag = 1;
 				central_unpair_enable = 0;
 
-				#if (BIBOO_UX_ENABLE)
-				/*BIBOO custom: mark this disconnect as "caused by unpair" so that
-				 *blm_disconnect_event_handle() suppresses auto pairing and the
-				 *just-unpaired mouse is not immediately re-connected*/
-				bibo_unpair_no_repair = 1;
+				#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+				user_module_unpair_triggered();  /*BIBOO UX: mark unpair to suppress auto re-pair, see vendor/user/mouse_fwd*/
 				#endif
 
 				#if (BLE_HOST_SMP_ENABLE)
@@ -376,9 +374,12 @@ int main_idle_loop (void)
 
 	host_pair_unpair_proc();
 
-	#if (BIBOO_UX_ENABLE)
-	/*enable HID notify(CCC) after SMP&SDP done, must before first notify*/
-	host_enable_notify_proc();
+	/*BIBOO UX: HID/voice CCC enable is handled by ux_mouse_fwd_notify_proc() and
+	 *ux_voice_dec_ccc_proc() via user_module_proc(), see vendor/user/mouse_fwd & voice_dec*/
+
+	#if (BIBOO_UX_USER_MODULE)
+	/*BIBOO UX: proc all vendor/user modules (currently none enabled on the dongle side)*/
+	user_module_proc();
 	#endif
 
 

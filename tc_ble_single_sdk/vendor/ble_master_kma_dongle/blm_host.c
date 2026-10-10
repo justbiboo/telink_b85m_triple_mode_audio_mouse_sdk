@@ -33,6 +33,7 @@
 #include "application/audio/audio_config.h"
 #include "application/audio/tl_audio.h"
 #include "app_audio.h"
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module hooks (mouse_fwd, voice_dec)*/
 
 
 extern u8 read_by_type_req_uuidLen;
@@ -59,28 +60,10 @@ int user_manual_pairing;
 int	central_pairing_enable = 0;
 int central_unpair_enable = 0;
 
-#if (BIBOO_UX_ENABLE)
-/*BIBOO custom: auto pairing mode.
- * - set to 1 at power-on (app.c user_init) and after every link loss
- *   (blm_disconnect_event_handle), so the dongle searches the mouse and
- *   pairs/connects automatically without pressing any button.
- * - while set, only the mouse ADV signature is accepted (see
- *   blm_le_adv_report_event_handle) to avoid connecting to unrelated
- *   nearby BLE devices.
- * - cleared by the unpair procedure (see app.c host_pair_unpair_proc) so
- *   the just-unpaired mouse is not immediately re-connected; it is set
- *   again on next power-on or on the next non-unpair link loss.*/
-int central_auto_pairing_enable = 0;
-/*one-shot: set when unpair triggers the disconnect, consumed in
- *blm_disconnect_event_handle to suppress auto pairing for that disconnect*/
-int bibo_unpair_no_repair = 0;
-#endif
-
-#if (BIBOO_UX_ENABLE)
-/*BIBOO custom: voice stream from mouse (my_Data characteristic, uuid16 0xB03E @ service 0xFFF0)*/
-#define BIBO_APP_DATA_IN_UUID   0xB03E
-u16 bibo_voice_att_handle = 0;   //voice characteristic value handle, found in SDP callback
-#endif
+/*BIBOO UX: central_auto_pairing_enable / ux_unpair_no_repair moved to
+ *vendor/user/mouse_fwd (ux_mouse_fwd.c); BIBO_APP_DATA_IN_UUID / voice handle
+ *moved to vendor/user/voice_dec (ux_voice_dec.c). Both dispatched via
+ *vendor/user/user_module_manage.c.*/
 
 #if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
 /*debug: mouse link trace*/
@@ -110,6 +93,7 @@ extern volatile u32 dbg_rstb_cnt;
 extern volatile u32 dbg_rstblk_cnt;
 extern volatile u32 dbg_vskp_cnt;
 extern volatile u32 dbg_loop_cnt;
+extern u16 ux_voice_dec_att_handle;	/*vendor/user/voice_dec (ux_voice_dec.c)*/
 #endif
 
 const u8 	telink_adv_trigger_pairing[] = {5, 0xFF, 0x11, 0x02, 0x01, 0x00};
@@ -254,26 +238,10 @@ int blm_le_adv_report_event_handle(u8 *p)
 	//manual pairing methods 1: button triggers
 	user_manual_pairing = central_pairing_enable && (rssi > -56);  //button trigger pairing(rssi threshold, short distance)
 
-	#if (BIBOO_UX_ENABLE)
-	/*BIBOO custom: auto pairing trigger (power-on / after link loss, no button).
-	 *accept only the mouse ADV signature to avoid connecting to unrelated
-	 *nearby BLE devices. two fixed layouts on mouse side:
-	 *  - MS swift-pair layout : [3]=len3 [4]=0x19(Appearance) [5..6]=0xC2,0x03 (0x03C2 mouse)
-	 *  - plain layout         : [3]=len3 [4]=0x03(UUID16 list) [5..6]=0x12,0x18 (0x1812 HID)*/
-	if(!user_manual_pairing && central_auto_pairing_enable && (rssi > -56))
-	{
-		if(pa->len >= 7)
-		{
-			if((pa->data[3] == 0x03) && (pa->data[4] == 0x19) && (pa->data[5] == 0xC2) && (pa->data[6] == 0x03))
-			{
-				user_manual_pairing = 1;  //Appearance = 0x03C2 (mouse)
-			}
-			else if((pa->data[3] == 0x03) && (pa->data[4] == 0x03) && (pa->data[5] == 0x12) && (pa->data[6] == 0x18))
-			{
-				user_manual_pairing = 1;  //uuid16 list contains 0x1812 (HID service)
-			}
-		}
-	}
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+	/*BIBOO UX: auto pairing trigger (power-on / after link loss, no button) - only
+	 *the mouse ADV signature is accepted; see vendor/user/mouse_fwd/ux_mouse_fwd.c*/
+	user_manual_pairing = user_manual_pairing || user_module_adv_auto_pair(pa, rssi);
 	#endif
 
 	//manual pairing methods 2: special pairing ADV data
@@ -484,28 +452,10 @@ int 	blm_disconnect_event_handle(u8 *p)
 							OWN_ADDRESS_PUBLIC, SCAN_FP_ALLOW_ADV_ANY);
 	blc_ll_setScanEnable (BLC_SCAN_ENABLE, DUP_FILTER_DISABLE);
 
-	#if (BIBOO_UX_ENABLE)
-	/*BIBOO custom: link lost -> re-enter pairing mode automatically, so the mouse
-	 *can be found and re-connected/re-paired without pressing any button.
-	 *exception: if this disconnect was triggered by the unpair procedure, stay
-	 *out of auto pairing (otherwise the just-unpaired mouse would be re-connected
-	 *immediately); auto pairing comes back on next power-on or next normal
-	 *link loss.*/
-	if(bibo_unpair_no_repair)
-	{
-		bibo_unpair_no_repair = 0;
-		central_auto_pairing_enable = 0;
-		#if (BIBOO_UX_DEBUG)
-		tlkapi_printf(APP_LOG_EN, "[DBG] disconnect by unpair, auto pairing suppressed\n");
-		#endif
-	}
-	else
-	{
-		central_auto_pairing_enable = 1;
-		#if (BIBOO_UX_DEBUG)
-		tlkapi_printf(APP_LOG_EN, "[DBG] link lost (r=%x), enter auto pairing\n", pDisConn->reason);
-		#endif
-	}
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+	/*BIBOO UX: link lost -> re-enter auto pairing (suppressed if this disconnect
+	 *was caused by the unpair procedure); see vendor/user/mouse_fwd/ux_mouse_fwd.c*/
+	user_module_disconnect_evt(pDisConn->reason);
 	#endif
 
 
@@ -705,7 +655,7 @@ void dbg_ble_status_print(void)
 		dbg_smp_done, central_sdp_pending,
 		conn_char_handler[3], conn_char_handler[4], conn_char_handler[5],
 		(int)dbg_noti_cnt, dbg_last_noti_handle, (int)dbg_mouse_cnt,
-		bibo_voice_att_handle, (int)dbg_voice_rx_cnt,
+		ux_voice_dec_att_handle, (int)dbg_voice_rx_cnt,
 		dbg_vlen_last, (int)dbg_vbuf_cnt, (int)dbg_vdec_cnt, (int)dbg_vwr_len, (int)dbg_visr_cnt, (int)dbg_vusb_cnt,
 		(int)dbg_vcall_cnt, (int)dbg_vdec_us, (int)dbg_vdec_us_max, (int)dbg_rsta_cnt, (int)dbg_rstb_cnt, (int)dbg_rstblk_cnt,
 		(int)dbg_sdkloop_us_max, (int)dbg_usbhs_us_max, (int)dbg_sdkloop_us, (int)dbg_usbhs_us, (int)dbg_btisr_acc, (int)dbg_usbisr_acc, (int)dbg_vskp_cnt, (int)dbg_loop_cnt);
@@ -718,92 +668,9 @@ void dbg_ble_status_print(void)
 }
 #endif
 
-#if (BIBOO_UX_ENABLE)
-/**
- * @brief      SDP callback: find mouse voice stream characteristic (my_Data, uuid16 0xB03E)
- *             value handle, so that notifications can be routed and CCC subscribed.
- */
-void bibo_sdp_get_handle_cb(att_db_uuid16_t *p16, att_db_uuid128_t *p128)
-{
-	(void)p128;
-	bibo_voice_att_handle = blm_att_findHandleOfUuid16(p16, BIBO_APP_DATA_IN_UUID, 0);
-	#if (BIBOO_UX_DEBUG)
-	tlkapi_printf(APP_LOG_EN, "[DBG] BIBOO voice handle=%x\n", bibo_voice_att_handle);
-	#endif
-}
-
-/**
- * @brief      enable slave HID report notification by writing CCC (0x2902) after SDP done.
- *             mouse side bls_att_pushNotifyData checks CCC, without this no notify can be received.
- *             BIBOO: also subscribe mouse voice characteristic (my_Data 0xB03E) for voice stream.
- */
-void host_enable_notify_proc(void)
-{
-	static u8 ccc_done = 0;
-	static u8 voice_ccc_done = 0;
-
-	if(blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
-	{
-		ccc_done = 0;  //reset for next connection
-		voice_ccc_done = 0;
-		return;
-	}
-	if(central_sdp_pending)  //SDP still ongoing
-	{
-		return;
-	}
-	#if (BLE_HOST_SMP_ENABLE)
-		if(central_smp_pending)  //SMP pairing still ongoing
-		{
-			return;
-		}
-	#endif
-
-	/*BIBOO: subscribe voice notify (CCC handle = voice value handle + 1)*/
-	if(!voice_ccc_done && bibo_voice_att_handle)
-	{
-		u8 vccc[2] = {0x01, 0x00};
-		if(!blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, bibo_voice_att_handle + 1, vccc, 2))
-		{
-			voice_ccc_done = 1;
-			#if (BIBOO_UX_DEBUG)
-			tlkapi_printf(APP_LOG_EN, "[DBG] BIBOO voice CCC written (h=%x)\n", bibo_voice_att_handle + 1);
-			#endif
-		}
-	}
-
-	if(ccc_done)  //HID CCC already done
-	{
-		return;
-	}
-	if(!conn_char_handler[3] || !conn_char_handler[4] || !conn_char_handler[5])
-	{
-		return;  //handle not ready (SDP failed or not started)
-	}
-
-	/*CCC handle = report value handle + 1 (ATT table: prop, value, CCC, report-ref)*/
-	u8 ccc[2] = {0x01, 0x00};
-	u8 fail = 0;
-	if(blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, HID_HANDLE_CONSUME_REPORT + 1, ccc, 2)){
-		fail = 1;
-	}
-	if(blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, HID_HANDLE_KEYBOARD_REPORT + 1, ccc, 2)){
-		fail = 1;
-	}
-	if(blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, HID_HANDLE_MOUSE_REPORT + 1, ccc, 2)){
-		fail = 1;
-	}
-
-	if(!fail)
-	{
-		ccc_done = 1;
-		#if (BIBOO_UX_DEBUG)
-		tlkapi_printf(APP_LOG_EN, "[DBG] CCC enabled (H3=%x H4=%x H5=%x)\n",
-			HID_HANDLE_CONSUME_REPORT, HID_HANDLE_KEYBOARD_REPORT, HID_HANDLE_MOUSE_REPORT);
-		#endif
-	}
-}
-#endif
+/*BIBOO UX: bibo_sdp_get_handle_cb() and host_enable_notify_proc() moved to
+ *vendor/user/voice_dec (ux_voice_dec.c) and vendor/user/mouse_fwd (ux_mouse_fwd.c),
+ *dispatched via user_module_init()/user_module_proc() in user_module_manage.c*/
 
 volatile int app_l2cap_handle_cnt = 0;
 
@@ -1016,7 +883,7 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 				att_keyboard (conn_handle, pAtt->dat);
 
 			}
-			#if (BIBOO_UX_ENABLE) /*custom fix: forward mouse report to usb*/
+			#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE) /*BIBOO UX: forward mouse report to usb (6-byte BLE report -> 4-byte USB frames, see vendor/user/mouse_fwd)*/
 			else if(attHandle == HID_HANDLE_MOUSE_REPORT)
 			{
 				static u32 app_mouse_dat;
@@ -1119,14 +986,14 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 				}
 			}
 #endif
-#if (BIBOO_UX_ENABLE) /*BIBOO custom: route mouse voice stream notify (my_Data 0xB03E)*/
-			else if(bibo_voice_att_handle && attHandle == bibo_voice_att_handle)
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE) /*BIBOO UX: route mouse voice stream notify (my_Data 0xB03E, see vendor/user/voice_dec)*/
+			else if(attHandle && attHandle == user_module_voice_att_handle())
 			{
 				#if (BIBOO_UX_DEBUG)
 				dbg_voice_rx_cnt++;
 				dbg_vlen_last = (u16)(pAtt->l2capLen - 3);
 				#endif
-				bibo_att_mic ((u16)(pAtt->l2capLen - 3), pAtt->dat);
+				user_module_voice_rx ((u16)(pAtt->l2capLen - 3), pAtt->dat);
 			}
 #endif
 			else

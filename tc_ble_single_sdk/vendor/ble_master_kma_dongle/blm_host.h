@@ -62,12 +62,8 @@ extern int central_smp_pending;
 extern int central_pairing_enable;
 extern int central_unpair_enable;
 
-#if (BIBOO_UX_ENABLE)
-/*BIBOO custom: auto pairing mode (set at power-on / after link loss, no button needed)*/
-extern int central_auto_pairing_enable;
-/*BIBOO custom: one-shot flag, suppress auto pairing for the disconnect caused by unpair*/
-extern int bibo_unpair_no_repair;
-#endif
+/*BIBOO UX: central_auto_pairing_enable / ux_unpair_no_repair externs moved to
+ *vendor/user/mouse_fwd/ux_mouse_fwd.h (dispatched via user_module_manage.c)*/
 
 #if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
 /*debug: mouse link trace*/
@@ -83,15 +79,7 @@ extern volatile u32 dbg_usbhs_us;
 void dbg_ble_status_print(void);
 #endif
 
-#if (BIBOO_UX_ENABLE)
-/**
- * @brief      enable slave HID report notification by writing CCC after SDP done
- */
-void host_enable_notify_proc(void);
-
-/**
- * @brief      SDP callback: find mouse voice stream characteristic handle (my_Data, uuid16 0xB03E)
- */
-void bibo_sdp_get_handle_cb(att_db_uuid16_t *p16, att_db_uuid128_t *p128);
-#endif
+/*BIBOO UX: host_enable_notify_proc() / bibo_sdp_get_handle_cb() moved to
+ *vendor/user/mouse_fwd (ux_mouse_fwd.h) and vendor/user/voice_dec (ux_voice_dec.h),
+ *dispatched via user_module_proc()/user_module_init() in user_module_manage.c*/
 #endif /* APP_HOST_H_ */

@@ -21,6 +21,7 @@
  *******************************************************************************************************/
 
 #include "AAA_public_config.h"
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module entry (ux_mic_stream, ...)*/
 //#include "../common/tl_audio.h"
 
 
@@ -1569,35 +1570,8 @@ void ble_pm_aaa()
 // main loop flow
 /////////////////////////////////////////////////////////////////////
 
-#if (BIBOO_UX_MIC_STREAM)
-/* BIBOO UX: after BLE link-up, automatically open the mic and keep the
- * audio stream alive. proc_audio_ble() then keeps encoding the REAL mic
- * audio (16kHz/16bit/mono) into mSBC frames (57B/7.5ms), which are sent
- * to the dongle through GATT notify.
- * (With BIBOO_UX_SINE_TEST=1, proc_mic_encoder replaces the samples by a
- *  1kHz sine tone instead - end-to-end chain sanity check.) */
-void bibo_ble_mic_proc(void)
-{
-    if (fun_mode != RF_1M_BLE_MODE)
-    {
-        return;
-    }
-
-    if (blc_ll_getCurrentState() == BLS_LINK_STATE_CONN)
-    {
-        if (!ui_mic_enable)
-        {
-            audio_mic_param_init();             //reset mSBC encoder state
-            audio_stick = clock_time() | 1;
-            ui_enable_mic(1);                   //start AMIC -> 7.5ms encode tick
-        }
-        else if (audio_start)
-        {
-            audio_stick = clock_time() | 1;     //keep stream alive (no duration limit)
-        }
-    }
-}
-#endif
+/* BIBOO UX: bibo_ble_mic_proc() moved to vendor/user/mic_stream/ux_mic_stream.c
+ * (renamed ux_mic_stream_proc), dispatched via user_module_proc() in main_loop. */
 
 void main_loop(void)
 {
@@ -1620,17 +1594,13 @@ void main_loop(void)
 
 #endif
 	proc_audio_ble();
-#if (BIBOO_UX_MIC_STREAM)
-    bibo_ble_mic_proc();
-#endif
-#if (BIBOO_UX_MIC_STREAM && !BLE_AUDIO_ENABLE)
-    //MTU exchange for the 57B notify: user_requestMtuSizeExchange() is only
-    //built when BLE_AUDIO_ENABLE==1, so perform the exchange here instead.
-    if (ui_mtu_size_exchange_req && blc_ll_getCurrentState() == BLS_LINK_STATE_CONN)
-    {
-        ui_mtu_size_exchange_req = 0;
-        blc_att_requestMtuSizeExchange(BLS_CONN_HANDLE, 0x009e);
-    }
+
+	/* ================ BIBOO UX: vendor/user module entry ================
+	 * dispatches every UX sub-module under vendor/user/ (mic stream, ...);
+	 * each sub-module is internally gated by its own switch
+	 * (BIBOO_UX_MIC_STREAM, ...). See vendor/user/user_module_manage.c */
+#if (BIBOO_UX_USER_MODULE)
+	user_module_proc();
 #endif
     u16 time_interval = 4500;
 #if(BLT_SOFTWARE_TIMER_ENABLE)
