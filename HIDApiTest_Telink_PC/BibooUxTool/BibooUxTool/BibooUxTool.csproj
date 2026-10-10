@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- 与 BibooHid.dll (x64) 保持一致 -->
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <RootNamespace>BibooUxTool</RootNamespace>
+    <AssemblyName>BibooUxTool</AssemblyName>
+    <DebugType>embedded</DebugType>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Version>0.1.0</Version>
+    <Product>Biboo UX Tool</Product>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 构建后复制 BibooHid.dll (x64)。
+         通过 sln 构建时 DLL 输出到 $(SolutionDir)x64\$(Configuration)；
+         单独构建 BibooHid 工程时输出到 BibooHid\x64\$(Configuration)。
+         两个位置按需复制，先存在者优先。 -->
+    <None Include="..\x64\$(Configuration)\BibooHid.dll" Link="BibooHid.dll"
+          Condition="Exists('..\x64\$(Configuration)\BibooHid.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="..\BibooHid\x64\$(Configuration)\BibooHid.dll" Link="BibooHid.dll"
+          Condition="'$(BuildingInsideVisualStudio)' == '' And Exists('..\BibooHid\x64\$(Configuration)\BibooHid.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

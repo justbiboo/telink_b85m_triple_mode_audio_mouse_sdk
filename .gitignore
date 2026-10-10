@@ -71,3 +71,9 @@ x64/
 *.ipch
 *.opendb
 Browse.VC.db*
+
+# BibooUxTool 上位机（C# WinForms + C++ DLL）构建输出
+HIDApiTest_Telink_PC/BibooUxTool/**/bin/
+HIDApiTest_Telink_PC/BibooUxTool/**/obj/
+HIDApiTest_Telink_PC/BibooUxTool/**/*.user
+HIDApiTest_Telink_PC/BibooUxTool/build_log.txt
