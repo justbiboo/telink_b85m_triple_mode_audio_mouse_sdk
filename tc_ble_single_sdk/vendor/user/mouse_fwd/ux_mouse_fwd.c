@@ -3,7 +3,7 @@
  *
  * @brief   BIBOO UX module (dongle side): forward the BLE mouse to USB.
  *          Logic migrated from vendor/ble_master_kma_dongle/{app.c,blm_host.c,
- *          blm_att.c} (originally wrapped by "BIBOO_UX_ENABLE" at each site).
+ *          blm_att.c} (originally wrapped by "BIBOO_UX_MOUSE_FWD" at each site).
  *
  * @author  BIBOO UX
  *
@@ -12,7 +12,7 @@
 #include "ux_mouse_fwd.h"
 
 
-#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_MOUSE_FWD)
 
 #include "drivers.h"
 #include "stack/ble/ble.h"
@@ -206,4 +206,4 @@ void ux_mouse_fwd_notify_proc(void)
 	}
 }
 
-#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE */
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_MOUSE_FWD */

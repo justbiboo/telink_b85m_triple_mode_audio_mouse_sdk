@@ -4,7 +4,7 @@
  * @brief   BIBOO UX module (dongle side): BLE voice stream decoder
  *          (mouse -> dongle -> PC microphone). Logic migrated from
  *          vendor/ble_master_kma_dongle/app_audio.c (originally wrapped by
- *          "BIBOO_UX_ENABLE" at each site).
+ *          "BIBOO_UX_VOICE_DEC" at each site).
  *
  * @author  BIBOO UX
  *
@@ -13,7 +13,7 @@
 #include "ux_voice_dec.h"
 
 
-#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_VOICE_DEC)
 
 #include "drivers.h"							/* reg_usb_ep7_* (register.h) */
 #include "stack/ble/ble.h"
@@ -369,4 +369,4 @@ _attribute_ram_code_ void ux_voice_dec_usb_sine (void)
 }
 #endif
 
-#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE */
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_VOICE_DEC */

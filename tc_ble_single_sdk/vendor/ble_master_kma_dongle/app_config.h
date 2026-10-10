@@ -25,24 +25,36 @@
 
 #include  "application/audio/audio_common.h"
 
-/* ================ BIBOO Custom UX: BLE Mouse Forward ================
- * BIBOO_UX_ENABLE isolates all custom modifications vs. original Telink
- * SDK for forwarding BLE mouse reports to USB (KMA dongle). Verified PASS.
- *   1 : enable (BLE mouse report -> USB mouse forwarding works)
- *   0 : original SDK behavior (mouse forward does NOT work)
- * All custom code is wrapped by "BIBOO_UX_ENABLE", search it to
- * locate every modified place:
- *   - vendor/ble_master_kma_dongle/blm_host.c  : restore mouse notify branch;
- *                                                CCC(0x2902) enable after SMP&SDP
- *   - vendor/ble_master_kma_dongle/blm_att.c   : parse 6-byte BLE mouse report
- *                                                (btn+s16x+s16y+wheel) -> 4-byte USB report
- *   - application/usbstd/usb.c                 : restore usbmouse_report_frame()
- *                                                /usbmouse_release_check()/fifo_proc calls
- *   - application/app/usbmouse_i.h             : mouse HID descriptor uses 8-bit X/Y
- *                                                (4-byte report, match mouse_data_t)
+/* ================ BIBOO Custom UX: vendor/user module switches ================
+ * All custom (non-Telink) dongle logic lives in the vendor/user directory and
+ * is dispatched through user_module_manage.c; each feature has exactly ONE
+ * switch below (formerly all bundled under a single BIBOO_UX_ENABLE).
  * =================================================================== */
-#ifndef BIBOO_UX_ENABLE
-#define BIBOO_UX_ENABLE			1
+/*BIBOO UX: per-module switches of the vendor/user directory (each module has
+ *exactly one switch; the master switch BIBOO_UX_USER_MODULE lives in
+ *vendor/user/user_module_manage.h). Every dongle-side switch defined here is
+ *automatically undefined (=0) on the mouse project, so shared SDK files
+ *(usb.c, usbmouse_i.h, usbkb.c, ...) use them as the dongle/mouse compile
+ *discriminator. Search each switch to locate its module + SDK-side spots:
+ *   BIBOO_UX_MOUSE_FWD : BLE mouse -> USB forwarding
+ *                        (vendor/user/mouse_fwd + blm_host.c/blm_att.c/app.c
+ *                         hooks + usb.c fifo + usbmouse_i.h 8-bit X/Y report)
+ *   BIBOO_UX_VOICE_DEC : BLE voice stream mSBC decode -> USB mic
+ *                        (vendor/user/voice_dec + app_audio.c hooks +
+ *                         blm_host.c notify routing + 48MHz clock forcing)
+ *   BIBOO_UX_KB_FIX    : keyboard release-report fifo ordering fix (usbkb.c,
+ *                        stuck-key when EP busy)
+ *   BIBOO_UX_HOST_LINK : USB HID 0x05 host channel (vendor/user/host_link) */
+#ifndef BIBOO_UX_MOUSE_FWD
+#define BIBOO_UX_MOUSE_FWD		1
+#endif
+
+#ifndef BIBOO_UX_VOICE_DEC
+#define BIBOO_UX_VOICE_DEC		1
+#endif
+
+#ifndef BIBOO_UX_KB_FIX
+#define BIBOO_UX_KB_FIX			1
 #endif
 
 /* BLE mouse report format (bytes), must match the mouse firmware config
@@ -70,6 +82,18 @@
 /* debug trace (prints "[DBG] ..." to UART): 0-off, 1-on */
 #ifndef BIBOO_UX_DEBUG
 #define BIBOO_UX_DEBUG		    1
+#endif
+
+/* USB HID host communication channel (dongle <-> PC host tool, e.g.
+ * BibooUxTool) on Feature Report id 0x05 (7-byte payload, EP0 control
+ * transfer), implemented by the vendor/user/host_link module:
+ *   downlink: host SET_REPORT(Feature,0x05) -> command dispatch
+ *             ([0]=cmd, [1..6]=args; unknown cmds keep the echo response)
+ *   uplink  : host GET_REPORT(Feature,0x05) -> response readback
+ *   1 : enable (default; legacy SET->GET echo behavior preserved)
+ *   0 : disable (original SDK 0x05 response behavior restored) */
+#ifndef BIBOO_UX_HOST_LINK
+#define BIBOO_UX_HOST_LINK		1
 #endif
 
 
@@ -211,8 +235,8 @@
 
 ///////////////////////// System Clock  Configuration /////////////////////////////////////////
 /*BIBOO: the custom mSBC voice decode chain needs SBC-class CPU headroom (the same rule the
- * SDK itself applies to its SBC/MSBC audio modes), so force 48MHz when BIBOO_UX_ENABLE */
-#if ((TL_AUDIO_MODE & (TL_AUDIO_MASK_SBC_MODE|TL_AUDIO_MASK_MSBC_MODE)) || (BIBOO_UX_ENABLE))
+ * SDK itself applies to its SBC/MSBC audio modes), so force 48MHz when BIBOO_UX_VOICE_DEC */
+#if ((TL_AUDIO_MODE & (TL_AUDIO_MASK_SBC_MODE|TL_AUDIO_MASK_MSBC_MODE)) || (BIBOO_UX_VOICE_DEC))
 #define CLOCK_SYS_CLOCK_HZ  								48000000
 #else
 #define CLOCK_SYS_CLOCK_HZ  								32000000

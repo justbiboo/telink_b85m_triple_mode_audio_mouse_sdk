@@ -59,9 +59,9 @@ _attribute_ram_code_ void  usb_endpoints_irq_handler (void)
 		/////// get MIC input data ///////////////////////////////
 		//usb_iso_in_1k_square ();
 		//usb_iso_in_from_mic ();
-		#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE && BIBOO_UX_SINE_TEST)
+		#if (BIBOO_UX_USER_MODULE && BIBOO_UX_VOICE_DEC && BIBOO_UX_SINE_TEST)
 		user_module_voice_usb_sine ();  //BIBOO UX: 1kHz sine test tone on USB EP7
-		#elif (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+		#elif (BIBOO_UX_USER_MODULE && BIBOO_UX_VOICE_DEC)
 		if (user_module_voice_active ())
 		{
 			user_module_voice_usb ();  //BIBOO UX: output decoded mouse voice stream
@@ -109,7 +109,7 @@ _attribute_ram_code_ void proc_audio (void)
 		abuf_init ();
 	}
 	abuf_mic_dec ();
-	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_VOICE_DEC)
 	if (user_module_voice_active ())
 	{
 		user_module_voice_dec_proc ();  //BIBOO UX: decode mouse voice stream (mSBC 57B/frame)

@@ -71,7 +71,7 @@ void	att_mouse (u16 conn, u8 *p)
 	 *  p[0]:btn, p[1..2]:x(s16, little-endian), p[3..4]:y(s16), p[5]:wheel
 	 *USB HID mouse report is 4 bytes(btn, s8 x, s8 y, s8 wheel),
 	 *  split big move into several frames when |x| or |y| > 127 */
-	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_MOUSE_FWD)
 	user_module_att_mouse(p);  /*BIBOO UX: 6-byte BLE report -> 4-byte USB frames, see vendor/user/mouse_fwd*/
 	#else
 	/*original SDK behavior (note: mismatches the 6-byte report layout)*/

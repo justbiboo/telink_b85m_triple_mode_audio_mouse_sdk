@@ -8,7 +8,7 @@
  *          buffers, decodes (mSBC -> 16K PCM) and feeds the PCM to USB
  *          ISO IN EP7. Logic migrated from
  *          vendor/ble_master_kma_dongle/{app_audio.c,blm_host.c,app.c}.
- *          Switch: BIBOO_UX_ENABLE (dongle app_config.h; undefined on the
+ *          Switch: BIBOO_UX_VOICE_DEC (dongle app_config.h; undefined on the
  *          mouse project, where this module compiles to nothing).
  *
  * @author  BIBOO UX
@@ -21,7 +21,7 @@
 #include "vendor/user/user_module_manage.h"	/*BIBOO UX: brings in the master switch BIBOO_UX_USER_MODULE*/
 
 
-#if (BIBOO_UX_ENABLE)
+#if (BIBOO_UX_VOICE_DEC)
 
 /*voice stream characteristic (my_Data, uuid16 0xB03E) value handle,
  *found by the SDP callback registered in ux_voice_dec_init*/
@@ -37,7 +37,7 @@ void ux_voice_dec_usb(void);	/*USB ISO IN irq: feed decoded PCM to EP7*/
 void ux_voice_dec_usb_sine(void);	/*USB ISO IN irq: 1kHz sine test tone (EP7)*/
 #endif
 
-#endif /* BIBOO_UX_ENABLE */
+#endif /* BIBOO_UX_VOICE_DEC */
 
 
 #endif /* UX_VOICE_DEC_H_ */

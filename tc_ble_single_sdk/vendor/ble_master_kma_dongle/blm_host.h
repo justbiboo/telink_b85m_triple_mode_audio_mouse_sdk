@@ -65,7 +65,7 @@ extern int central_unpair_enable;
 /*BIBOO UX: central_auto_pairing_enable / ux_unpair_no_repair externs moved to
  *vendor/user/mouse_fwd/ux_mouse_fwd.h (dispatched via user_module_manage.c)*/
 
-#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+#if (BIBOO_UX_DEBUG)
 /*debug: mouse link trace*/
 extern volatile u8  dbg_smp_done;
 extern volatile u8  dbg_sdp_pending;

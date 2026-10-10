@@ -89,7 +89,7 @@ void usbkb_report_frame(void)
 	return;
 }
 
-#if BIBOO_UX_ENABLE
+#if BIBOO_UX_KB_FIX
 /*BIBOO UX fix: queue one keyboard report into usb_fifo. Used when the USB EP
  * is busy OR the fifo still holds pending reports, so a new report can never
  * jump ahead of queued ones (ordering) and a release report can never be
@@ -110,7 +110,7 @@ static void usbkb_queue_report(int ctrl_key, u8 *keycode)
 }
 #endif
 
-#if BIBOO_UX_ENABLE
+#if BIBOO_UX_KB_FIX
 static void usbkb_release_normal_key(void){
 	if(usbkb_not_released & KB_NORMAL_RELEASE_MASK){
 		u8 normal_keycode[KEYBOARD_REPORT_KEY_MAX] = {0};
@@ -252,7 +252,7 @@ int usbkb_hid_report_normal(u8 ctrl_key, u8 *keycode){
 	return 1;
 }
 
-#if BIBOO_UX_ENABLE
+#if BIBOO_UX_KB_FIX
 static inline void usbkb_report_normal_key(int ctrl_key, u8 *keycode, int cnt){
 	/*BIBOO UX fix: original code only set KB_NORMAL_RELEASE_MASK when the report
 	 * went straight to the EP (return 1). When the EP was busy the report was

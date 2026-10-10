@@ -39,6 +39,7 @@
 #include "../app/usbkb_i.h"
 #include "../app/usbcdc.h"
 #include "../app/usbaud_i.h"
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: user_module_host_link_* hooks (HID 0x05 host channel, vendor/user/host_link)*/
 
 #if (USB_SOMATIC_ENABLE)
 #include "../app/usbsomatic_i.h"
@@ -59,15 +60,17 @@ usb_set_hid_report_t  usb_custom_set_hid_report_func=0;
 u8		host_keyboard_status;
 u8		host_cmd[8];
 u8		host_cmd_pairing_ok = 0;
-#if (BIBOO_UX_ENABLE)
+#if (BIBOO_UX_HOST_LINK)
 /*BIBOO: vendor data channel on mouse interface, report id 0x05 (7-byte payload),
  *all over EP0 control transfers (mouse report descriptor NOT touched - an Input
  *item in the 0x05 collection makes Windows fail to start MI_04!):
- *  downlink: host SET_REPORT(Feature,0x05) -> stored here (HID_REPORT_CUSTOM
- *            branch of the SetReport case; the SDK enum maps the standard
- *            Feature type 3 to HID_REPORT_CUSTOM, not to its Feature value 2)
- *  uplink  : host GET_REPORT(Feature,0x05) -> returns bibo_feat_rx_buf (HID_REQ_GetReport)*/
-u8		bibo_feat_rx_buf[7];
+ *  downlink: host SET_REPORT(Feature,0x05) -> user_module_host_link_rx()
+ *            (HID_REPORT_CUSTOM branch of the SetReport case; the SDK enum
+ *            maps the standard Feature type 3 to HID_REPORT_CUSTOM, not to
+ *            its Feature value 2)
+ *  uplink  : host GET_REPORT(Feature,0x05) -> user_module_host_link_tx_buf()
+ *            (HID_REQ_GetReport). Channel state & command dispatch live in
+ *            the vendor/user/host_link module (ux_host_link.c).*/
 #endif
 static USB_Request_Hdr_t control_request;
 static u8 * g_response = 0;
@@ -434,15 +437,17 @@ void usb_handle_out_class_intf_req(int data_request) {
 			break;
 		case HID_REPORT_CUSTOM:
 #if (USB_CUSTOM_HID_REPORT)
-#if (BIBOO_UX_ENABLE && USB_MOUSE_ENABLE)
+#if (USB_MOUSE_ENABLE && BIBOO_UX_HOST_LINK)
 		/*BIBOO: the host SET_REPORT(Feature,0x05) arrives HERE, not in the
 		 *Feature-typed case above: the host wValue is 0x0305 (report type 3 =
 		 *Feature per the USB HID spec), while the SDK enum maps standard type 3
 		 *to HID_REPORT_CUSTOM (its Feature value is 2). The wire data stage is
-		 *8 bytes: [0]=report id 0x05, [1..7]=payload. Read the payload into
-		 *bibo_feat_rx_buf and skip the pairing / custom-register logic.*/
+		 *8 bytes: [0]=report id 0x05, [1..7]=payload. Route the payload into
+		 *the vendor/user/host_link module (default echo + cmd dispatch) and
+		 *skip the pairing / custom-register logic.*/
 		if ((control_request.Value & 0xff) == 0x05) {
 			if (data_request) {
+				u8 _pay[7];
 				int _i;
 				int _len = control_request.Length;
 				if (_len > 8) { _len = 8; }
@@ -450,12 +455,13 @@ void usb_handle_out_class_intf_req(int data_request) {
 				for (_i = 0; _i < _len; _i++) {
 					u8 _b = usbhw_read_ctrl_ep_data();
 					if (8 == _len) {
-						if (_i >= 1) { bibo_feat_rx_buf[_i - 1] = _b; } //skip wire report id
+						if (_i >= 1 && (_i - 1) < 7) { _pay[_i - 1] = _b; } //skip wire report id
 					}
 					else if (_i < 7) {
-						bibo_feat_rx_buf[_i] = _b;
+						_pay[_i] = _b;
 					}
 				}
+				user_module_host_link_rx((_len == 8) ? 7 : _len, _pay);
 			}
 			break;
 		}
@@ -568,7 +574,7 @@ void usb_handle_out_class_intf_req(int data_request) {
 
 
 
-void usb_handle_in_class_intf_req() {
+void usb_handle_in_class_intf_req(u8 data_request) {
 	u8 property = control_request.Request;
 #if (USB_MIC_ENABLE || USB_SPEAKER_ENABLE)
 	u8 value_h = (control_request.Value >> 8);
@@ -601,17 +607,26 @@ void usb_handle_in_class_intf_req() {
 			else
 #elif (USB_CUSTOM_HID_REPORT)
 			if( control_request.Value==0x0305 ) {
-			#if (BIBOO_UX_ENABLE && USB_MOUSE_ENABLE)
-				/*BIBOO: echo readback - PC GET_REPORT(Feature,0x05) reads back the last
-				 *payload written by SET_REPORT(Feature,0x05).
+			#if (USB_MOUSE_ENABLE && BIBOO_UX_HOST_LINK)
+				/*BIBOO: uplink readback - PC GET_REPORT(Feature,0x05) reads the
+				 *response payload prepared by the vendor/user/host_link module
+				 *(user_module_host_link_tx_buf): echo of the last SET payload by
+				 *default, or the response of the last dispatched command.
 				 *Response layout = [report id 0x05][7-byte payload], because Windows
 				 *HIDClass treats the first byte of the GET_REPORT data phase as the
-				 *report id (see hidapi hid_get_feature_report comment).*/
-				{
+				 *report id (see hidapi hid_get_feature_report comment).
+				 *BIBOO: run in the EP0 setup stage ONLY. The SDK calls this GET
+				 *case twice per control transfer (setup stage + data stage, see
+				 *usb_handle_request callers) - running it once keeps the host_link
+				 *GET counter/dump single-per-transfer; the fifo written here is
+				 *served by the hardware on the data stage IN token directly, the
+				 *data stage pass leaves it untouched.*/
+				if (USB_IRQ_SETUP_REQ == data_request) {
 					int _i;
+					u8 *_tp = user_module_host_link_tx_buf();
 					usbhw_write_ctrl_ep_data(0x05); //report id, matches wValue 0x0305
 					for(_i=0;_i<7;_i++) {
-						usbhw_write_ctrl_ep_data(bibo_feat_rx_buf[_i]);
+						usbhw_write_ctrl_ep_data(_tp[_i]);
 					}
 				}
 			#else
@@ -828,7 +843,7 @@ void usb_handle_request(u8 data_request) {
 		usb_handle_out_class_endp_req();
 		break;
 	case (REQDIR_DEVICETOHOST | REQTYPE_CLASS | REQREC_INTERFACE):
-		usb_handle_in_class_intf_req();
+		usb_handle_in_class_intf_req(data_request);
 		break;
 	case (REQDIR_DEVICETOHOST | REQTYPE_CLASS | REQREC_ENDPOINT):
 		usb_handle_in_class_endp_req();
@@ -1017,7 +1032,7 @@ void usb_handle_irq(void) {
 	}
 
 	#if(USB_MOUSE_ENABLE)
-	#if (BIBOO_UX_ENABLE) /*custom fix: forward BLE mouse report to USB*/
+	#if (BIBOO_UX_MOUSE_FWD) /*custom fix: forward BLE mouse report to USB*/
 		extern void usbmouse_report_frame(void);
 		extern void usbmouse_release_check(void);
 		usbmouse_report_frame();
@@ -1031,7 +1046,7 @@ void usb_handle_irq(void) {
 		//usbkb_report_frame();
 		//usbkb_release_check();
 	#endif
-	#if (BIBOO_UX_ENABLE) /*custom fix: consume usb report fifo (mouse)*/
+	#if (BIBOO_UX_MOUSE_FWD) /*custom fix: consume usb report fifo (mouse)*/
 	usb_hid_report_fifo_proc();
 	#endif
 }

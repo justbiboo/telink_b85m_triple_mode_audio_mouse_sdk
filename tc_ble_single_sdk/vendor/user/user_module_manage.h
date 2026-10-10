@@ -14,11 +14,12 @@
  *          Each hook is wrapped by "#if (BIBOO_UX_USER_MODULE)" so searching
  *          "BIBOO_UX_USER_MODULE" locates every integration point, and each
  *          sub-module inside user_module_manage.c is additionally gated by its
- *          own per-module switch (e.g. BIBOO_UX_MIC_STREAM, defined in each
- *          project's app_config header). Surgical patches that are deeply
- *          coupled with original SDK code (e.g. blm_att.c report parsing,
- *          usb.c forwarding) intentionally stay in place, wrapped by
- *          "BIBOO_UX_ENABLE".
+ *          own per-module switch (BIBOO_UX_MIC_STREAM, BIBOO_UX_MOUSE_FWD,
+ *          BIBOO_UX_VOICE_DEC, BIBOO_UX_HOST_LINK, defined in each project's
+ *          app_config header). Surgical patches that are deeply coupled with
+ *          original SDK code (e.g. blm_att.c report parsing, usb.c forwarding,
+ *          usbkb.c release ordering) intentionally stay in place, wrapped by
+ *          the per-module switch they belong to.
  *
  * @author  BIBOO UX
  *
@@ -51,13 +52,13 @@ void user_module_init(void);
 void user_module_proc(void);
 
 
-#if (BIBOO_UX_ENABLE)
+#if (BIBOO_UX_USER_MODULE)
 /* ================ dongle-side event hooks ================
- * Dispatched to the BIBOO_UX_ENABLE feature modules (mouse_fwd, voice_dec;
- * dongle only). Every hook compiles to a no-op when the master switch
- * BIBOO_UX_USER_MODULE or the module switch BIBOO_UX_ENABLE is 0, so the
- * call sites in the original SDK files stay unconditional-looking and
- * thin. Search "user_module_" in the SDK files to locate every hook.
+ * Dispatched to the dongle feature modules (mouse_fwd, voice_dec, host_link).
+ * Every hook compiles to a no-op when the master switch BIBOO_UX_USER_MODULE
+ * or the module's own switch is 0, so the call sites in the original SDK
+ * files stay unconditional-looking and thin. Search "user_module_" in the
+ * SDK files to locate every hook.
  * ========================================================= */
 
 /* blm_le_adv_report_event_handle (blm_host.c): auto pairing ADV filter.
@@ -90,7 +91,15 @@ void user_module_voice_usb(void);
 void user_module_voice_usb_sine(void);
 #endif
 
-#endif /* BIBOO_UX_ENABLE */
+/* usb.c EP0 (SET_REPORT Feature,0x05): route a host command payload
+ * (<=7 bytes, [0]=cmd) into the host_link module (downlink) */
+void user_module_host_link_rx(u8 len, u8 *p);
+
+/* usb.c EP0 (GET_REPORT Feature,0x05): pointer to the 7-byte response
+ * payload served to the host (uplink readback) */
+u8  *user_module_host_link_tx_buf(void);
+
+#endif /* BIBOO_UX_USER_MODULE */
 
 
 #endif /* USER_MODULE_MANAGE_H_ */

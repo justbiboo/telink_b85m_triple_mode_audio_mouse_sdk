@@ -7,9 +7,9 @@
  *          - enable HID report notify (CCC write) after SMP & SDP
  *          - convert the 6-byte BLE mouse report to 4-byte USB HID frames
  *          Logic migrated from vendor/ble_master_kma_dongle/{app.c,blm_host.c,
- *          blm_att.c}. Switch: BIBOO_UX_ENABLE (defined in the dongle project's
- *          app_config.h; undefined on the mouse project, where this module
- *          compiles to nothing). All entry points are dispatched from
+ *          blm_att.c}. Switch: BIBOO_UX_MOUSE_FWD (defined in the dongle
+ *          project's app_config.h; undefined on the mouse project, where this
+ *          module compiles to nothing). All entry points are dispatched from
  *          vendor/user/user_module_manage.c.
  *
  * @author  BIBOO UX
@@ -22,7 +22,7 @@
 #include "vendor/user/user_module_manage.h"	/*BIBOO UX: brings in the master switch BIBOO_UX_USER_MODULE*/
 
 
-#if (BIBOO_UX_ENABLE)
+#if (BIBOO_UX_MOUSE_FWD)
 
 /*BIBOO UX: auto pairing mode (set at power-on / after link loss, no button needed)*/
 extern int central_auto_pairing_enable;
@@ -37,7 +37,7 @@ void ux_mouse_fwd_disconnect_evt(u8 reason);
 void ux_mouse_fwd_att_mouse(u8 *p);
 void ux_mouse_fwd_notify_proc(void);
 
-#endif /* BIBOO_UX_ENABLE */
+#endif /* BIBOO_UX_MOUSE_FWD */
 
 
 #endif /* UX_MOUSE_FWD_H_ */

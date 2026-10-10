@@ -288,7 +288,7 @@ void host_pair_unpair_proc(void)
 				master_disconnect_flag = 1;
 				central_unpair_enable = 0;
 
-				#if (BIBOO_UX_USER_MODULE && BIBOO_UX_ENABLE)
+				#if (BIBOO_UX_USER_MODULE && BIBOO_UX_MOUSE_FWD)
 				user_module_unpair_triggered();  /*BIBOO UX: mark unpair to suppress auto re-pair, see vendor/user/mouse_fwd*/
 				#endif
 
@@ -315,20 +315,20 @@ void host_pair_unpair_proc(void)
 int main_idle_loop (void)
 {
 
-	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	#if (BIBOO_UX_DEBUG)
 	u32 _dbg_t0 = clock_time ();
 	#endif
 	////////////////////////////////////// BLE entry /////////////////////////////////
 	blt_sdk_main_loop();
 
-	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	#if (BIBOO_UX_DEBUG)
 	u32 _dbg_t1 = clock_time ();
 	#endif
 
 	///////////////////////////////////// proc usb cmd from host /////////////////////
 	usb_handle_irq();
 
-	#if (BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	#if (BIBOO_UX_DEBUG)
 	{
 		u32 _dbg_t2 = clock_time ();
 		u32 _dbg_dt = _dbg_t1 - _dbg_t0;
@@ -415,14 +415,14 @@ void main_loop(void)
 		simple_sdp_loop();
 	#endif
 
-	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_ENABLE && BIBOO_UX_DEBUG)
+	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_DEBUG)
 	extern volatile u32 dbg_loop_cnt;
 	static u32 tick = 0;
 	dbg_loop_cnt ++;
 	if (clock_time_exceed(tick, 1000000))
 	{
 		tick = clock_time();
-		dbg_ble_status_print();
+		//dbg_ble_status_print();	/*BIBOO: temporarily muted, uncomment to restore*/
 	}
 	#endif
 }
