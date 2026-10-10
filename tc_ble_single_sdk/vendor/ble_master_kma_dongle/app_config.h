@@ -45,6 +45,16 @@
 #define BIBOO_UX_ENABLE			1
 #endif
 
+/* BLE mouse report format (bytes), must match the mouse firmware config
+ * (vendor/8258_dual_mouse or vendor/827x_three_mode_mouse AAA_app_config_*.h):
+ *   6 : btn + s16 x + s16 y + wheel  (Telink mouse default)
+ *   4 : btn + s8  x + s8  y + wheel  (legacy hamster dongle v5.3 compatible)
+ * blm_att.c att_mouse() parses the BLE report accordingly, and the USB HID
+ * mouse descriptor (application/app/usbmouse_i.h) keys its X/Y size off it. */
+#ifndef MOUSE_DATA_LEN_AAA
+#define MOUSE_DATA_LEN_AAA		4
+#endif
+
 /* USB test case: 1kHz sine test tone on the dongle USB microphone.
  * While a PC app captures audio (host polls USB ISO IN EP7 every 1ms),
  * EP7 outputs a 1kHz sine wave (16K/16bit mono PCM, one full 1kHz period

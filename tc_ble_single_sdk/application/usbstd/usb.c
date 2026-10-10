@@ -59,6 +59,16 @@ usb_set_hid_report_t  usb_custom_set_hid_report_func=0;
 u8		host_keyboard_status;
 u8		host_cmd[8];
 u8		host_cmd_pairing_ok = 0;
+#if (BIBOO_UX_ENABLE)
+/*BIBOO: vendor data channel on mouse interface, report id 0x05 (7-byte payload),
+ *all over EP0 control transfers (mouse report descriptor NOT touched - an Input
+ *item in the 0x05 collection makes Windows fail to start MI_04!):
+ *  downlink: host SET_REPORT(Feature,0x05) -> stored here (HID_REPORT_CUSTOM
+ *            branch of the SetReport case; the SDK enum maps the standard
+ *            Feature type 3 to HID_REPORT_CUSTOM, not to its Feature value 2)
+ *  uplink  : host GET_REPORT(Feature,0x05) -> returns bibo_feat_rx_buf (HID_REQ_GetReport)*/
+u8		bibo_feat_rx_buf[7];
+#endif
 static USB_Request_Hdr_t control_request;
 static u8 * g_response = 0;
 static u16 g_response_len = 0;
@@ -393,6 +403,9 @@ void usb_handle_out_class_intf_req(int data_request) {
 				host_keyboard_status = usbhw_read_ctrl_ep_data();
 				}
 			}
+			/*NOTE: the standard Feature SET_REPORT (wValue high byte 3, e.g. 0x0305)
+			 *does NOT land here -- the SDK enum maps standard type 3 to
+			 *HID_REPORT_CUSTOM; the vendor 0x05 downlink is handled in that case.*/
 			#if(USB_UPGRATE_OTA)
 			u8 report_id=control_request.Value&0xff;
 			u16  length=control_request.Length;
@@ -421,6 +434,32 @@ void usb_handle_out_class_intf_req(int data_request) {
 			break;
 		case HID_REPORT_CUSTOM:
 #if (USB_CUSTOM_HID_REPORT)
+#if (BIBOO_UX_ENABLE && USB_MOUSE_ENABLE)
+		/*BIBOO: the host SET_REPORT(Feature,0x05) arrives HERE, not in the
+		 *Feature-typed case above: the host wValue is 0x0305 (report type 3 =
+		 *Feature per the USB HID spec), while the SDK enum maps standard type 3
+		 *to HID_REPORT_CUSTOM (its Feature value is 2). The wire data stage is
+		 *8 bytes: [0]=report id 0x05, [1..7]=payload. Read the payload into
+		 *bibo_feat_rx_buf and skip the pairing / custom-register logic.*/
+		if ((control_request.Value & 0xff) == 0x05) {
+			if (data_request) {
+				int _i;
+				int _len = control_request.Length;
+				if (_len > 8) { _len = 8; }
+				usbhw_reset_ctrl_ep_ptr (); //address
+				for (_i = 0; _i < _len; _i++) {
+					u8 _b = usbhw_read_ctrl_ep_data();
+					if (8 == _len) {
+						if (_i >= 1) { bibo_feat_rx_buf[_i - 1] = _b; } //skip wire report id
+					}
+					else if (_i < 7) {
+						bibo_feat_rx_buf[_i] = _b;
+					}
+				}
+			}
+			break;
+		}
+#endif
 		{	//pairing, EMI-TX, EMI-RX
 			if (data_request) {
 				int i=0;
@@ -562,6 +601,20 @@ void usb_handle_in_class_intf_req() {
 			else
 #elif (USB_CUSTOM_HID_REPORT)
 			if( control_request.Value==0x0305 ) {
+			#if (BIBOO_UX_ENABLE && USB_MOUSE_ENABLE)
+				/*BIBOO: echo readback - PC GET_REPORT(Feature,0x05) reads back the last
+				 *payload written by SET_REPORT(Feature,0x05).
+				 *Response layout = [report id 0x05][7-byte payload], because Windows
+				 *HIDClass treats the first byte of the GET_REPORT data phase as the
+				 *report id (see hidapi hid_get_feature_report comment).*/
+				{
+					int _i;
+					usbhw_write_ctrl_ep_data(0x05); //report id, matches wValue 0x0305
+					for(_i=0;_i<7;_i++) {
+						usbhw_write_ctrl_ep_data(bibo_feat_rx_buf[_i]);
+					}
+				}
+			#else
 				if (USB_CUSTOM_HID_REPORT_REG_ACCESS && custom_reg_cmd) {
 					usbhw_write_ctrl_ep_data (custom_read_dat);
 					usbhw_write_ctrl_ep_data (custom_read_dat>>8);
@@ -582,6 +635,7 @@ void usb_handle_in_class_intf_req() {
 					usbhw_write_ctrl_ep_data (0x08);
 					usbhw_write_ctrl_ep_data (0x00);
 				}
+			#endif
 			}
 			else
 #endif

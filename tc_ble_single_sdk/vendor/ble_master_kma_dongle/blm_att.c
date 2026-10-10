@@ -65,11 +65,12 @@ void	att_mouse (u16 conn, u8 *p)
 {
 	(void)conn;
 #if (USB_MOUSE_ENABLE)
-#if (BIBOO_UX_ENABLE)
-	/*custom fix: mouse BLE report(8258_dual_mouse, MOUSE_DATA_LEN_AAA = 6):
+#if (MOUSE_DATA_LEN_AAA == 6)
+	/* mouse BLE report (MOUSE_DATA_LEN_AAA = 6, e.g. 8258_dual_mouse):
 	 *  p[0]:btn, p[1..2]:x(s16, little-endian), p[3..4]:y(s16), p[5]:wheel
 	 *USB HID mouse report is 4 bytes(btn, s8 x, s8 y, s8 wheel),
 	 *  split big move into several frames when |x| or |y| > 127 */
+	#if (BIBOO_UX_ENABLE)
 	mouse_data_t mouse_dat_report;
 	mouse_dat_report.btn = p[0];
 	mouse_dat_report.wheel = 0; /*wheel only attached to the last frame*/
@@ -107,16 +108,28 @@ void	att_mouse (u16 conn, u8 *p)
 	mouse_dat_report.y = (s8)y;
 	mouse_dat_report.wheel = wheel; /*attach wheel to the last frame*/
 	usbmouse_add_frame(&mouse_dat_report, 1);
-#else
+	#else
+	/*original SDK behavior (note: mismatches the 6-byte report layout)*/
 	(void)p;
 	mouse_data_t mouse_dat_report;
 	mouse_dat_report.btn = *p++;
 	mouse_dat_report.x = *p++;
 	mouse_dat_report.y = *p++;
 	mouse_dat_report.wheel = *p;
-
-	extern void usbmouse_add_frame (mouse_data_t *packet_mouse, int packet_num);
 	usbmouse_add_frame(&mouse_dat_report, 1);
+	#endif
+#elif (MOUSE_DATA_LEN_AAA == 4)
+	/* mouse BLE report (MOUSE_DATA_LEN_AAA = 4):
+	 *  p[0]:btn, p[1]:x(s8), p[2]:y(s8), p[3]:wheel - straight through,
+	 *  same layout as mouse_data_t / USB HID 8-bit X/Y report */
+	mouse_data_t mouse_dat_report;
+	mouse_dat_report.btn = *p++;
+	mouse_dat_report.x = *p++;
+	mouse_dat_report.y = *p++;
+	mouse_dat_report.wheel = *p;
+	usbmouse_add_frame(&mouse_dat_report, 1);
+#else
+#error "MOUSE_DATA_LEN_AAA must be 4 or 6 (see app_config.h)"
 #endif
 #endif
 

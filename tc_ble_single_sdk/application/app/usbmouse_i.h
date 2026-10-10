@@ -362,7 +362,7 @@ static const u8 mouse_report_desc[] =
     0x75, 0x08, //  Report Size (8)
     0x95, 0x02, //  Report Count (2)
 #else
-#if (1)//(MOUSE_DATA_LEN_AAA==6)
+#if (MOUSE_DATA_LEN_AAA==6)
 	0x16, 0x01, 0x80, //  LOGICAL_MINIMUM(-32767)
 	0x26, 0xff, 0x7f,
 	0x75, 0x10, //	Report Size (16)

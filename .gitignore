@@ -40,6 +40,11 @@ subdir.mk
 # 补丁文件
 #*.patch
 
+# Telink Eclipse 构建生成目录（每个 build configuration 一个，CDT 自动生成，
+# 如 project/tlsr_tc32/B87/827x_master_kma_dongle/）；保留各芯片目录顶层的
+# .cproject/.project（工程配置）和 boot.link（链接脚本）
+tc_ble_single_sdk/project/tlsr_tc32/*/*/
+
 # 临时文件
 *.tmp
 *.temp
