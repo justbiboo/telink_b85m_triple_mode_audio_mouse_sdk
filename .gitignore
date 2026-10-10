@@ -58,3 +58,11 @@ Thumbs.db
 # 脚本输出文件
 *.out
 *.err
+
+# 上位机
+x64/
+.vs/
+*.vsidx
+*.ipch
+*.opendb
+Browse.VC.db*
