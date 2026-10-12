@@ -131,24 +131,10 @@ void user_module_voice_usb(void)
 #endif
 }
 
-/* usb.c EP0 SET_REPORT(Feature,0x05): route a host command payload
- * (<=7 bytes, [0]=cmd) into the host_link module (downlink) */
 void user_module_host_link_rx(u8 len, u8 *p)
 {
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
 	ux_host_link_rx(len, p);
-#endif
-}
-
-/* usb.c EP0 GET_REPORT(Feature,0x05): pointer to the 7-byte response
- * payload served to the host (uplink readback) */
-u8 *user_module_host_link_tx_buf(void)
-{
-#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
-	return ux_host_link_tx_buf();
-#else
-	static u8 _idle[7] = {0};	/*call site is compiled out; safety only*/
-	return _idle;
 #endif
 }
 

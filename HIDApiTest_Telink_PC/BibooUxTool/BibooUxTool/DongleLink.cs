@@ -3,8 +3,8 @@ using System;
 namespace BibooUxTool
 {
     /// <summary>
-    /// dongle 0x05 通道连接管理（线程安全：所有调用串行化）。
-    /// payload 固定 7 字节；report id 0x05 由 DLL 层负责组包/拆包。
+    /// dongle HID 通道连接管理。
+    /// payload 固定 7 字节；下行使用 Feature Report 0x09，上行使用 Input Report 0x08。
     /// </summary>
     public sealed class DongleLink : IDisposable
     {
@@ -17,7 +17,7 @@ namespace BibooUxTool
         }
 
         /// <summary>
-        /// 枚举并打开 dongle（col04 优先）。
+        /// 枚举并打开 dongle 的独立 Host Link HID Interface。
         /// 成功返回 null；失败返回错误描述。
         /// </summary>
         public string Connect()
@@ -70,7 +70,7 @@ namespace BibooUxTool
             }
         }
 
-        /// <summary>读取最近一次写入的 payload（固件当前为回显）。返回 0 成功 / -1 失败。</summary>
+        /// <summary>阻塞等待设备主动发送的 Input Report。返回 0 成功 / -1 失败。</summary>
         public int TryRead(out byte[] payload7, out string err)
         {
             lock (_sync)
@@ -92,6 +92,33 @@ namespace BibooUxTool
                     return -1;
                 }
                 return 0;
+            }
+        }
+
+        /// <summary>最多等待 timeoutMs 毫秒。返回 1=收到，0=超时，-1=失败。</summary>
+        public int TryReadTimeout(int timeoutMs, out byte[] payload7, out string err)
+        {
+            lock (_sync)
+            {
+                payload7 = new byte[7];
+                err = null;
+                if (_h == IntPtr.Zero)
+                {
+                    err = "未连接";
+                    return -1;
+                }
+
+                int r = BibooHidNative.bh_read_timeout(_h, payload7, payload7.Length, timeoutMs);
+                if (r == 0)
+                    return 0;
+                if (r < 0)
+                {
+                    err = BibooHidNative.LastError();
+                    if (string.IsNullOrEmpty(err))
+                        err = "bh_read_timeout 失败";
+                    return -1;
+                }
+                return 1;
             }
         }
 

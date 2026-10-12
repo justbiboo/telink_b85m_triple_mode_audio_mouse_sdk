@@ -1,31 +1,27 @@
 using System;
 using System.Drawing;
 using System.Globalization;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace BibooUxTool
 {
     /// <summary>
     /// dongle 收发调试主界面：
-    ///   连接（枚举+探测打开 col04） / 发送 7 字节 payload / 回读与轮询 / 收发日志。
-    /// 固件当前 0x05 通道为回显：GET 返回最近一次 SET 的内容。
+    ///   连接 / 发送 7 字节 payload / 后台监听 Input Report / 收发日志。
     /// </summary>
     public sealed class MainForm : Form
     {
         private readonly DongleLink _link = new DongleLink();
-        private readonly Timer _pollTimer = new Timer();
-        private readonly byte[] _lastRx = new byte[7];
+        private volatile Thread _readerThread;
+        private volatile bool _readerRunning;
 
         private Button _btnConnect;
         private Label _lblStatus;
         private Label _lblPath;
         private TextBox _txtPayload;
         private Button _btnSend;
-        private CheckBox _chkEcho;
-        private Button _btnReadNow;
         private Label _lblRx;
-        private CheckBox _chkPoll;
-        private NumericUpDown _numInterval;
         private RichTextBox _txtLog;
         private Button _btnClear;
 
@@ -33,13 +29,13 @@ namespace BibooUxTool
         {
             BuildUi();
             UpdateConnUi(false);
-            LogLine("Biboo UX 收发调试工具就绪（dongle 0x248A:0xCA10，report 0x05，payload 7 字节）。", Color.DimGray);
+            LogLine("Biboo UX 收发调试工具就绪（下行 0x09 Feature，上行 0x08 Input，payload 7 字节）。", Color.DimGray);
             LogLine("请插入 dongle 后点击【连接】。", Color.DimGray);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            _pollTimer.Stop();
+            StopReader();
             _link.Dispose();
             base.OnFormClosed(e);
         }
@@ -96,67 +92,28 @@ namespace BibooUxTool
             _btnSend.Text = "发送";
             _btnSend.Click += OnSend;
 
-            _chkEcho = new CheckBox();
-            _chkEcho.SetBounds(555, 31, 150, 22);
-            _chkEcho.Text = "发送后自动回读";
-            _chkEcho.Checked = true;
+            grpSend.Controls.AddRange(new Control[] { lblSend, _txtPayload, _btnSend });
 
-            grpSend.Controls.AddRange(new Control[] { lblSend, _txtPayload, _btnSend, _chkEcho });
-
-            // 接收
             var grpRx = new GroupBox();
-            grpRx.Text = "接收（GET_REPORT 0x05）";
+            grpRx.Text = "接收（Input Report 0x08）";
             grpRx.SetBounds(12, 182, 756, 66);
             grpRx.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
-            _btnReadNow = new Button();
-            _btnReadNow.SetBounds(15, 24, 92, 28);
-            _btnReadNow.Text = "立即读取";
-            _btnReadNow.Click += OnReadNow;
-
             _lblRx = new Label();
-            _lblRx.SetBounds(120, 28, 620, 22);
+            _lblRx.SetBounds(15, 28, 725, 22);
             _lblRx.Font = new Font("Consolas", 9.5f);
-            _lblRx.Text = "（尚未读取）";
+            _lblRx.Text = "（连接后自动监听）";
             _lblRx.TextAlign = ContentAlignment.MiddleLeft;
 
-            grpRx.Controls.AddRange(new Control[] { _btnReadNow, _lblRx });
+            grpRx.Controls.Add(_lblRx);
 
-            // 轮询
-            var grpPoll = new GroupBox();
-            grpPoll.Text = "轮询";
-            grpPoll.SetBounds(12, 254, 756, 58);
-            grpPoll.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-
-            _chkPoll = new CheckBox();
-            _chkPoll.SetBounds(15, 22, 80, 22);
-            _chkPoll.Text = "轮询";
-            _chkPoll.CheckedChanged += OnPollToggle;
-
-            _numInterval = new NumericUpDown();
-            _numInterval.SetBounds(100, 21, 80, 24);
-            _numInterval.Minimum = 100;
-            _numInterval.Maximum = 5000;
-            _numInterval.Increment = 100;
-            _numInterval.Value = 500;
-            _numInterval.ValueChanged += OnIntervalChanged;
-
-            var lblPollTip = new Label();
-            lblPollTip.SetBounds(190, 25, 550, 22);
-            lblPollTip.ForeColor = Color.DimGray;
-            lblPollTip.Text = "ms；轮询只发 GET 不发 SET，内容变化时才记日志";
-            lblPollTip.TextAlign = ContentAlignment.MiddleLeft;
-
-            grpPoll.Controls.AddRange(new Control[] { _chkPoll, _numInterval, lblPollTip });
-
-            // 日志
             var grpLog = new GroupBox();
             grpLog.Text = "日志";
-            grpLog.SetBounds(12, 318, 756, 270);
+            grpLog.SetBounds(12, 254, 756, 334);
             grpLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
             _txtLog = new RichTextBox();
-            _txtLog.SetBounds(15, 22, 726, 214);
+            _txtLog.SetBounds(15, 22, 726, 278);
             _txtLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             _txtLog.ReadOnly = true;
             _txtLog.BackColor = Color.White;
@@ -164,7 +121,7 @@ namespace BibooUxTool
             _txtLog.DetectUrls = false;
 
             _btnClear = new Button();
-            _btnClear.SetBounds(15, 240, 80, 24);
+            _btnClear.SetBounds(15, 304, 80, 24);
             _btnClear.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
             _btnClear.Text = "清空日志";
             _btnClear.Click += delegate { _txtLog.Clear(); };
@@ -172,9 +129,7 @@ namespace BibooUxTool
             grpLog.Controls.Add(_txtLog);
             grpLog.Controls.Add(_btnClear);
 
-            Controls.AddRange(new Control[] { grpDevice, grpSend, grpRx, grpPoll, grpLog });
-
-            _pollTimer.Tick += OnPollTick;
+            Controls.AddRange(new Control[] { grpDevice, grpSend, grpRx, grpLog });
         }
 
         private void UpdateConnUi(bool connected)
@@ -184,13 +139,8 @@ namespace BibooUxTool
             _lblStatus.ForeColor = connected ? Color.ForestGreen : Color.Firebrick;
             _lblPath.Text = connected ? _link.GetOpenedPath() : string.Empty;
             _btnSend.Enabled = connected;
-            _btnReadNow.Enabled = connected;
             if (!connected)
-            {
-                _pollTimer.Stop();
-                _chkPoll.Checked = false;
-                _lblRx.Text = "（尚未读取）";
-            }
+                _lblRx.Text = "（尚未连接）";
         }
 
         // ---------- 事件处理 ----------
@@ -199,40 +149,61 @@ namespace BibooUxTool
         {
             if (_link.IsConnected)
             {
-                _pollTimer.Stop();
-                _chkPoll.Checked = false;
+                StopReader();
                 _link.Disconnect();
                 UpdateConnUi(false);
                 LogLine("已断开。", Color.DimGray);
                 return;
             }
 
-            LogLine("正在枚举并打开 dongle（col04 优先，GET 0x05 探测）...", Color.DimGray);
-            string err;
+            LogLine("正在枚举并打开独立 Host Link HID Interface...", Color.DimGray);
             try
             {
-                err = _link.Connect();
+                string err = _link.Connect();
+                if (err != null)
+                {
+                    LogLine("连接失败: " + err, Color.Red);
+                    UpdateConnUi(false);
+                    return;
+                }
+
+                UpdateConnUi(true);
+                StartReader();
+                LogLine("已连接并开始监听 Input Report: " + _link.GetOpenedPath(), Color.DarkGreen);
             }
             catch (DllNotFoundException)
             {
-                LogLine("找不到 BibooHid.dll —— 请先在 VS 中编译 BibooHid 工程（x64）。", Color.Red);
-                return;
+                ResetConnectionAfterError();
+                LogLine("找不到 BibooHid.dll —— 请先重新生成整个 BibooUxTool.sln（x64）。", Color.Red);
             }
             catch (BadImageFormatException)
             {
+                ResetConnectionAfterError();
                 LogLine("BibooHid.dll 架构不匹配 —— DLL 与程序都必须是 x64。", Color.Red);
-                return;
             }
-
-            if (err != null)
+            catch (EntryPointNotFoundException ex)
             {
-                LogLine("连接失败: " + err, Color.Red);
-                UpdateConnUi(false);
-                return;
+                ResetConnectionAfterError();
+                LogLine("BibooHid.dll 版本不匹配 —— 请重新生成整个 BibooUxTool.sln（x64）：" + ex.Message, Color.Red);
             }
+            catch (Exception ex)
+            {
+                ResetConnectionAfterError();
+                LogLine("连接异常（" + ex.GetType().Name + "）：" + ex.Message, Color.Red);
+            }
+        }
 
-            UpdateConnUi(true);
-            LogLine("已连接: " + _link.GetOpenedPath(), Color.DarkGreen);
+        private void ResetConnectionAfterError()
+        {
+            StopReader();
+            try
+            {
+                _link.Disconnect();
+            }
+            catch (Exception)
+            {
+            }
+            UpdateConnUi(false);
         }
 
         private void OnSend(object sender, EventArgs e)
@@ -251,88 +222,73 @@ namespace BibooUxTool
                 LogLine("TX 失败: " + err, Color.Red);
                 return;
             }
-            LogLine("TX  05 " + Hex(payload), Color.DarkBlue);
+            LogLine("TX  09 " + Hex(payload), Color.DarkBlue);
+        }
 
-            if (_chkEcho.Checked)
+        private void StartReader()
+        {
+            _readerRunning = true;
+            _readerThread = new Thread(ReaderLoop);
+            _readerThread.IsBackground = true;
+            _readerThread.Start();
+        }
+
+        private void StopReader()
+        {
+            Thread reader = _readerThread;
+            _readerRunning = false;
+            _readerThread = null;
+            if (reader != null && reader != Thread.CurrentThread)
+                reader.Join(500);
+        }
+
+        private void ReaderLoop()
+        {
+            Thread reader = Thread.CurrentThread;
+            while (_readerRunning)
             {
                 byte[] rx;
-                string rerr;
-                if (_link.TryRead(out rx, out rerr) != 0)
+                string err;
+                int result = _link.TryReadTimeout(200, out rx, out err);
+                if (result == 0)
+                    continue;
+                if (result < 0)
                 {
-                    LogLine("回读失败: " + rerr, Color.Red);
+                    _readerRunning = false;
+                    if (IsHandleCreated && !IsDisposed)
+                        BeginInvoke(new Action(delegate { HandleReaderDisconnect(reader, err); }));
                     return;
                 }
-                ShowRx(rx);
-                bool same = BytesEqual(rx, payload);
-                LogLine("RX  05 " + Hex(rx) + (same ? "   (回显一致)" : "   (与发送不一致!)"),
-                        same ? Color.DarkGreen : Color.DarkOrange);
+
+                if (_readerRunning && IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        if (!_readerRunning)
+                            return;
+                        ShowRx(rx);
+                        LogLine("RX  08 " + Hex(rx), Color.DarkCyan);
+                    }));
+                }
             }
         }
 
-        private void OnReadNow(object sender, EventArgs e)
+        private void HandleReaderDisconnect(Thread reader, string err)
         {
-            byte[] rx;
-            string err;
-            if (_link.TryRead(out rx, out err) != 0)
-            {
-                LogLine("读取失败: " + err, Color.Red);
-                return;
-            }
-            ShowRx(rx);
-            LogLine("RX  05 " + Hex(rx), Color.DarkCyan);
-        }
-
-        private void OnPollToggle(object sender, EventArgs e)
-        {
-            _pollTimer.Stop();
-            if (_chkPoll.Checked && _link.IsConnected)
-            {
-                _pollTimer.Interval = (int)_numInterval.Value;
-                _pollTimer.Start();
-            }
-        }
-
-        private void OnIntervalChanged(object sender, EventArgs e)
-        {
-            if (_pollTimer.Enabled)
-                _pollTimer.Interval = (int)_numInterval.Value;
-        }
-
-        private void OnPollTick(object sender, EventArgs e)
-        {
-            if (!_link.IsConnected)
+            if (_readerThread != reader || !_link.IsConnected)
                 return;
 
-            byte[] rx;
-            string err;
-            if (_link.TryRead(out rx, out err) != 0)
-            {
-                LogLine("轮询读取失败: " + err, Color.Red);
-                return;
-            }
-            ShowRx(rx);
-            if (!BytesEqual(rx, _lastRx))
-            {
-                LogLine("RX(变化) 05 " + Hex(rx), Color.DarkCyan);
-                Array.Copy(rx, _lastRx, 7);
-            }
+            StopReader();
+            _link.Disconnect();
+            UpdateConnUi(false);
+            LogLine("USB Dongle 已断开: " + err, Color.Red);
         }
 
         // ---------- 工具方法 ----------
 
         private void ShowRx(byte[] payload7)
         {
-            _lblRx.Text = "05 " + Hex(payload7);
-        }
-
-        private static bool BytesEqual(byte[] a, byte[] b)
-        {
-            if (a == null || b == null || a.Length != b.Length)
-                return false;
-            for (int i = 0; i < a.Length; i++)
-                if (a[i] != b[i])
-                    return false;
-            return true;
+            _lblRx.Text = "08 " + Hex(payload7);
         }
 
         private static string Hex(byte[] data)
@@ -359,7 +315,7 @@ namespace BibooUxTool
             }
             if (parts.Length > 7)
             {
-                err = "payload 超过 7 字节（0x05 通道仅支持 7 字节）";
+                err = "payload 超过 7 字节（0x09 通道仅支持 7 字节）";
                 return false;
             }
 

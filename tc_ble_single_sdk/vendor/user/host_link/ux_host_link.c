@@ -16,61 +16,90 @@
 
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
 
-#include "drivers.h"							/* irq_disable / irq_restore */
+#include "application/usbstd/usb.h"
+#include "drivers.h"
+#include "stack/ble/controller/ble_controller.h"	/* blc_ll_getCurrentState, BLS_LINK_STATE_CONN (mouse link up test); NOTE: ll.h alone is not self-contained - blt_event_callback_t comes from controller.h, use the ble_controller.h umbrella */
 
 
 /*----------------------------------------------------------------------------
  * BIBOO UX: host link command set (payload[0]).
  * Known commands are dispatched synchronously inside ux_host_link_rx()
- * (EP0 irq context - keep them lightweight); the response overwrites the
- * tx buffer and is read back by the host with the next GET_REPORT.
- * Unknown commands keep the default echo response, so the legacy
- * "SET -> GET readback compare" of the host tool keeps passing.
+ * (EP0 irq context - keep them lightweight); the response is sent as an
+ * Input Report through ux_host_link_tx().
  *   0x00       : ECHO - default / fallback for unknown cmds (payload mirrored)
  *   0x01       : IDENT - module presence & version probe
- *   0x02..0x7f : reserved for business commands (dongle side features)
+ *   0x02       : TEST beacon - 1s periodic uplink while the mouse link is up
+ *   0x03..0x7f : reserved for business commands (dongle side features)
  *   0x80..     : reserved for debug commands
  * Heavy commands must NOT run in the EP0 irq: their dispatch() case should
  * only set a pending flag, the real work happens in ux_host_link_proc()
- * (main loop) and pushes the response via ux_host_link_tx().
+ * (main loop) and sends the response via ux_host_link_tx().
  *--------------------------------------------------------------------------*/
 #define UX_HLINK_CMD_ECHO    0x00
 #define UX_HLINK_CMD_IDENT   0x01
+#define UX_HLINK_CMD_BEACON  0x02
 
 /*module identification (cmd IDENT response): "BIBOO" magic + module version*/
 #define UX_HLINK_MAGIC0      0xB1
 #define UX_HLINK_MAGIC1      0xB0
 #define UX_HLINK_VERSION     0x01
 
-#define UX_HLINK_PAYLOAD     7      /*report id 0x05 payload size (bytes)*/
+#define UX_HLINK_PAYLOAD      UX_HLINK_REPORT_PAYLOAD_SIZE
+#define UX_HLINK_TX_FIFO_NUM  8
 
+static const u8 ux_hlink_report_desc[UX_HLINK_REPORT_DESC_SIZE] = {
+	0x06,0x00,0xff,
+	0x09,0x01,
+	0xa1,0x01,
+	0x85,UX_HLINK_FEATURE_REPORT_ID,
+	0x09,0x01,
+	0x15,0x00,
+	0x26,0xff,0x00,
+	0x75,0x08,
+	0x95,UX_HLINK_PAYLOAD,
+	0xb1,0x02,
+	0x85,UX_HLINK_INPUT_REPORT_ID,
+	0x09,0x02,
+	0x15,0x00,
+	0x26,0xff,0x00,
+	0x75,0x08,
+	0x95,UX_HLINK_PAYLOAD,
+	0x81,0x02,
+	0xc0,
+};
 
-/*last SET_REPORT payload (downlink command, [0]=cmd)*/
 static u8 ux_hlink_rx_buf[UX_HLINK_PAYLOAD];
-/*GET_REPORT readback content (uplink response, [0]=cmd)*/
-static u8 ux_hlink_tx_buf[UX_HLINK_PAYLOAD];
-/*bumped on every downlink frame; wake marker for ux_host_link_proc()*/
+static u8 ux_hlink_tx_fifo[UX_HLINK_TX_FIFO_NUM][UX_HLINK_PAYLOAD];
+static volatile u8 ux_hlink_tx_wptr = 0;
+static volatile u8 ux_hlink_tx_rptr = 0;
 static volatile u8 ux_hlink_rx_seq = 0;
 
 #if (BIBOO_UX_DEBUG)
-/*BIBOO debug: host link counters (volatile; hook them into the status
- *print of blm_host.c dbg_ble_status_print when needed)*/
-volatile u32 dbg_hrx_cnt = 0;   //SET_REPORT(0x05) frames received (downlink)
-volatile u32 dbg_hget_cnt = 0;  //GET_REPORT(0x05) readbacks served (uplink)
-volatile u32 dbg_hcmd_cnt = 0;  //known commands dispatched (echo excluded)
-volatile u32 dbg_htx_cnt = 0;   //business uplink writes (ux_host_link_tx)
+volatile u32 dbg_hrx_cnt = 0;
+volatile u32 dbg_hcmd_cnt = 0;
+volatile u32 dbg_htx_cnt = 0;
+volatile u32 dbg_htx_drop_cnt = 0;
 #endif
+
+
+u8 *ux_host_link_get_report_desc(void)
+{
+	return (u8 *)ux_hlink_report_desc;
+}
+
+u16 ux_host_link_get_report_desc_size(void)
+{
+	return sizeof(ux_hlink_report_desc);
+}
 
 
 #if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_DEBUG)
 /*BIBOO debug: dump one host link frame, e.g.
  * "[HLINK] RX: 01 00 00 00 00 00 00".
- * NOTE: also called from the EP0 irq (SET / GET_REPORT context). The 0x05
+ * NOTE: it may be called from the EP0 SET_REPORT irq context. The 0x09
  * channel is a low frequency control channel, so the ~2ms busy-wait GPIO
- * UART print is acceptable there: the SET payload is already drained from
- * the ctrl ep fifo, and the GET status stage is NAK-ed by hardware until
- * the irq returns. Keep frames short and do not add high frequency polls
- * on the host side while this print is enabled.*/
+ * UART print is acceptable there. Keep frames short while this print is
+ * enabled.*/
 static void ux_hlink_dump(const char *tag, const u8 *p, u8 len)
 {
 	u8 i;
@@ -115,92 +144,156 @@ static void ux_host_link_dispatch(const u8 *p, u8 *r)
 /*user_init (dispatched from user_module_init): reset the host link state*/
 void ux_host_link_init(void)
 {
-	u8 i;
-	for (i = 0; i < UX_HLINK_PAYLOAD; i++)
-	{
-		ux_hlink_rx_buf[i] = 0;
-		ux_hlink_tx_buf[i] = 0;
-	}
+	memset(ux_hlink_rx_buf, 0, sizeof(ux_hlink_rx_buf));
+	memset(ux_hlink_tx_fifo, 0, sizeof(ux_hlink_tx_fifo));
+	ux_hlink_tx_wptr = 0;
+	ux_hlink_tx_rptr = 0;
 	ux_hlink_rx_seq = 0;
 }
 
 
-/*downlink (EP0 irq, usb.c SET_REPORT Feature 0x05): route a host command
- *payload into the module. The payload is mirrored into the tx buffer first
- *(default echo response), then dispatched: known commands overwrite the
- *response synchronously, so "SET -> immediate GET" already reads it.*/
 void ux_host_link_rx(u8 len, u8 *p)
 {
 	u8 i;
+	u8 response[UX_HLINK_PAYLOAD] = {0};
 	if (len > UX_HLINK_PAYLOAD) { len = UX_HLINK_PAYLOAD; }
 	for (i = 0; i < len; i++)
 	{
 		ux_hlink_rx_buf[i] = p[i];
-		ux_hlink_tx_buf[i] = p[i];
+		response[i] = p[i];
 	}
-	ux_host_link_dispatch(ux_hlink_rx_buf, ux_hlink_tx_buf);
-	ux_hlink_rx_seq ++;		/*wake the main loop (see ux_host_link_proc)*/
+	for (; i < UX_HLINK_PAYLOAD; i++)
+	{
+		ux_hlink_rx_buf[i] = 0;
+	}
+	ux_host_link_dispatch(ux_hlink_rx_buf, response);
+	ux_host_link_tx(UX_HLINK_PAYLOAD, response);
+	ux_hlink_rx_seq ++;
 	#if (BIBOO_UX_DEBUG)
 	dbg_hrx_cnt ++;
 	#endif
 	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_DEBUG)
-	ux_hlink_dump("[HLINK] RX: ", p, len);	/*BIBOO debug: host downlink dump*/
+	ux_hlink_dump("[HLINK] RX: ", p, len);
 	#endif
 }
 
+
+/*---- test beacon (dongle -> host uplink) ----------------------------------
+ * While the BLE mouse link is up (link state CONN), push a rolling test
+ * Input Report every second. The host receives the frame through its
+ * pending Interrupt IN read.
+ * Set UX_HLINK_TEST_BEACON to 0 to mute it.--------------------------------*/
+#define UX_HLINK_TEST_BEACON   1     /*test: 1s uplink beacon while the mouse link is up*/
+#define UX_HLINK_BEACON_MS     1000  /*beacon period, ms*/
+
+#if (UX_HLINK_TEST_BEACON)
+static void ux_host_link_beacon_proc(void)
+{
+	static u32 tick = 0;
+	static u8 seq = 0;
+	u8 pay[UX_HLINK_PAYLOAD];
+	u8 i;
+
+	if (blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
+	{
+		tick = 0;	/*link down: reset, first frame goes out right after (re)connect*/
+		return;
+	}
+	if (!clock_time_exceed(tick, UX_HLINK_BEACON_MS * 1000))
+	{
+		return;
+	}
+	tick = clock_time();
+	seq ++;
+	pay[0] = UX_HLINK_CMD_BEACON;	/*test beacon command id*/
+	pay[1] = seq;					/*rolling sequence - host checks liveness with it*/
+	for (i = 2; i < UX_HLINK_PAYLOAD; i++)
+	{
+		pay[i] = 0;
+	}
+	ux_host_link_tx(UX_HLINK_PAYLOAD, pay);	/*dumps "[HLINK] TX:" on the debug uart*/
+}
+#endif
+
+
+static void ux_host_link_send_input_report(const u8 *report)
+{
+	reg_usb_ep_ptr(USB_EDP_APP_IN) = 0;
+	reg_usb_ep_dat(USB_EDP_APP_IN) = UX_HLINK_INPUT_REPORT_ID;
+	foreach(i, UX_HLINK_PAYLOAD)
+	{
+		reg_usb_ep_dat(USB_EDP_APP_IN) = report[i];
+	}
+	reg_usb_ep_ctrl(USB_EDP_APP_IN) = FLD_EP_DAT_ACK | (edp_toggle[USB_EDP_APP_IN] ? FLD_USB_EP_DAT1 : FLD_USB_EP_DAT0);
+	edp_toggle[USB_EDP_APP_IN] ^= 1;
+}
+
+static void ux_host_link_tx_proc(void)
+{
+	u8 report[UX_HLINK_PAYLOAD];
+	u8 irq_en;
+
+	if (usbhw_is_ep_busy(USB_EDP_APP_IN))
+	{
+		return;
+	}
+
+	irq_en = irq_disable();
+	if (ux_hlink_tx_rptr == ux_hlink_tx_wptr)
+	{
+		irq_restore(irq_en);
+		return;
+	}
+	memcpy(report, ux_hlink_tx_fifo[ux_hlink_tx_rptr], sizeof(report));
+	ux_hlink_tx_rptr = (ux_hlink_tx_rptr + 1) & (UX_HLINK_TX_FIFO_NUM - 1);
+	irq_restore(irq_en);
+
+	ux_host_link_send_input_report(report);
+}
 
 /*main loop (dispatched from user_module_proc): asynchronous command
  *extension point. Commands that need more than a few us (flash access,
  *radio commands, ...) must not run in the EP0 irq: their dispatch() case
  *sets a pending flag, the work runs here and pushes the response with
- *ux_host_link_tx(); the host reads it with the next GET_REPORT.
- *ux_hlink_rx_seq (bumped by every SET_REPORT) is the wake marker.
- *No async commands yet - nothing to do here.*/
+ *ux_host_link_tx().*/
 void ux_host_link_proc(void)
 {
+	#if (UX_HLINK_TEST_BEACON)
+	ux_host_link_beacon_proc();
+	#endif
+	ux_host_link_tx_proc();
 	(void)ux_hlink_rx_seq;
 }
 
 
-/*uplink readback (EP0 irq, usb.c GET_REPORT Feature 0x05): 7-byte response
- *payload served to the host (echo of the last SET payload by default, or
- *the response of the last dispatched command / business tx)*/
-u8 *ux_host_link_tx_buf(void)
-{
-	#if (BIBOO_UX_DEBUG)
-	/*single call per GET_REPORT transfer: usb.c gates the 0x05 GET branch
-	 *to the EP0 setup stage only (the SDK default runs every GET case in
-	 *both the setup and the data stage, which would double this counter
-	 *and the dump below; see the comment at the usb.c call site)*/
-	dbg_hget_cnt ++;
-	#endif
-	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_DEBUG)
-	ux_hlink_dump("[HLINK] TXGET: ", ux_hlink_tx_buf, UX_HLINK_PAYLOAD);	/*BIBOO debug: uplink readback dump*/
-	#endif
-	return ux_hlink_tx_buf;
-}
-
-
-/*business uplink (any context): queue a 7-byte response/data payload for
- *the host to read with its next GET_REPORT(Feature,0x05). Atomic against
- *the EP0 irq (GET readback / SET echo mirror), which runs on the same
- *tx buffer.*/
 void ux_host_link_tx(u8 len, u8 *p)
 {
-	u8 i;
+	u8 report[UX_HLINK_PAYLOAD] = {0};
+	u8 next_wptr;
 	u8 irq_en;
+
 	if (len > UX_HLINK_PAYLOAD) { len = UX_HLINK_PAYLOAD; }
-	irq_en = irq_disable();		/*atomic vs. EP0 irq on ux_hlink_tx_buf*/
-	for (i = 0; i < len; i++)
+	memcpy(report, p, len);
+
+	irq_en = irq_disable();
+	next_wptr = (ux_hlink_tx_wptr + 1) & (UX_HLINK_TX_FIFO_NUM - 1);
+	if (next_wptr == ux_hlink_tx_rptr)
 	{
-		ux_hlink_tx_buf[i] = p[i];
+		irq_restore(irq_en);
+		#if (BIBOO_UX_DEBUG)
+		dbg_htx_drop_cnt ++;
+		#endif
+		return;
 	}
+	memcpy(ux_hlink_tx_fifo[ux_hlink_tx_wptr], report, sizeof(report));
+	ux_hlink_tx_wptr = next_wptr;
 	irq_restore(irq_en);
+
 	#if (BIBOO_UX_DEBUG)
 	dbg_htx_cnt ++;
 	#endif
 	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_DEBUG)
-	ux_hlink_dump("[HLINK] TX: ", p, len);	/*BIBOO debug: business uplink dump*/
+	ux_hlink_dump("[HLINK] TX: ", report, UX_HLINK_PAYLOAD);
 	#endif
 }
 

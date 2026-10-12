@@ -28,6 +28,9 @@
 #if (USB_MOUSE_ENABLE)
 #include <application/app/usbmouse_i.h>
 #endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+#include <vendor/user/host_link/ux_host_link.h>
+#endif
 
 #if (USB_KEYBOARD_ENABLE)
 #include <application/app/usbkb_i.h>
@@ -227,7 +230,7 @@ const unsigned char OSFeatureDescriptor_compatID[] = {
 #define ID_PRODUCT	(ID_PRODUCT_BASE | (USB_PRINTER_ENABLE?(1<<0):0) | (USB_SPEAKER_ENABLE?(1<<1):0) | (USB_MIC_ENABLE?(1<<2):0)	\
 	 | (USB_MOUSE_ENABLE?(1<<3):0) | (USB_KEYBOARD_ENABLE?(1<<4):0) | (USB_SOMATIC_ENABLE?(1<<5):0))
 #else
-#define ID_PRODUCT    0xca10
+#define ID_PRODUCT    0x5862
 #endif
 #endif
 
@@ -251,10 +254,10 @@ const USB_Descriptor_Device_t device_desc = { {
 		8, // Endpoint0Size, Maximum Packet Size for Zero Endpoint. Valid Sizes are 8, 16, 32, 64
 		ID_VENDOR, // VendorID
 #if USB_CDC_ENABLE
-        0x8002, //0x8846, // need to check , driver is 0x8002 when cdc enable
+        ID_PRODUCT,
 #else
 #if AUDIO_HOGP
-        0xc080,//ID_PRODUCT, // ProductID
+        ID_PRODUCT,
 #else
         ID_PRODUCT,
 #endif
@@ -710,6 +713,26 @@ const USB_Descriptor_Configuration_t
 						USB_MOUSE_POLL_INTERVAL // PollingIntervalMS
 					}},
 #endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+				{ { sizeof(USB_Descriptor_Interface_t), DTYPE_Interface },
+					USB_INTF_HOST_LINK,
+					0,
+					1,
+					HID_CSCP_HIDClass, HID_CSCP_NonBootSubclass,
+					HID_CSCP_NonBootProtocol, NO_DESCRIPTOR
+				},
+				{
+					{ { sizeof(USB_HID_Descriptor_HID_t), HID_DTYPE_HID }, 0x0111,
+						USB_HID_COUNTRY_NONE, 1,
+						HID_DTYPE_Report, { UX_HLINK_REPORT_DESC_SIZE, 0x00 },
+					},
+					{ { sizeof(USB_Descriptor_Endpoint_t), DTYPE_Endpoint },
+						ENDPOINT_DIR_IN | USB_EDP_APP_IN,
+						EP_TYPE_INTERRUPT, 0x0010,
+						0x01
+					},
+				},
+#endif
 #if (USB_SOMATIC_ENABLE)
 				// SOMATICInterface
 				{	{sizeof(USB_Descriptor_Interface_t), DTYPE_Interface},
@@ -812,6 +835,11 @@ u8* usbdesc_get_audio(void) {
 #if (USB_MOUSE_ENABLE)
 u8* usbdesc_get_mouse(void) {
 	return (u8*) (&configuration_desc.mouse_descriptor);
+}
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+u8* usbdesc_get_host_link(void) {
+	return (u8*) (&configuration_desc.host_link_descriptor);
 }
 #endif
 

@@ -29,6 +29,9 @@
 #include <application/usbstd/PrinterClassCommon.h>
 #include <application/usbstd/USBController.h>
 #include "../../common/config/user_config.h"
+#if BIBOO_UX_HOST_LINK
+#include "vendor/user/user_module_manage.h"
+#endif
 
 // need to check
 #include <application/usbstd/stdDescriptors.h>
@@ -71,6 +74,9 @@ typedef enum {
 #endif
 #if USB_MOUSE_ENABLE
 	USB_INTF_MOUSE,
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+	USB_INTF_HOST_LINK,
 #endif
 #if USB_SOMATIC_ENABLE
 	USB_INTF_SOMATIC,
@@ -353,6 +359,10 @@ typedef struct {
 	USB_Descriptor_Interface_t mouse_interface;
 	USB_HID_Descriptor_HID_Mouse_t mouse_descriptor;
 #endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+	USB_Descriptor_Interface_t host_link_interface;
+	USB_HID_Descriptor_HID_APP_t host_link_descriptor;
+#endif
 #if (USB_SOMATIC_ENABLE)
 	// SOMATIC HID Interface
 	USB_Descriptor_Interface_t somatic_interface;
@@ -403,6 +413,9 @@ u8* usbdesc_get_audio(void);
 
 #if (USB_MOUSE_ENABLE)
 u8* usbdesc_get_mouse(void);
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+u8* usbdesc_get_host_link(void);
 #endif
 
 #if (USB_KEYBOARD_ENABLE)

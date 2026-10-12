@@ -44,7 +44,7 @@
  *                         blm_host.c notify routing + 48MHz clock forcing)
  *   BIBOO_UX_KB_FIX    : keyboard release-report fifo ordering fix (usbkb.c,
  *                        stuck-key when EP busy)
- *   BIBOO_UX_HOST_LINK : USB HID 0x05 host channel (vendor/user/host_link) */
+ *   BIBOO_UX_HOST_LINK : USB HID 0x09/0x08 host channel (vendor/user/host_link) */
 #ifndef BIBOO_UX_MOUSE_FWD
 #define BIBOO_UX_MOUSE_FWD		1
 #endif
@@ -85,13 +85,12 @@
 #endif
 
 /* USB HID host communication channel (dongle <-> PC host tool, e.g.
- * BibooUxTool) on Feature Report id 0x05 (7-byte payload, EP0 control
- * transfer), implemented by the vendor/user/host_link module:
- *   downlink: host SET_REPORT(Feature,0x05) -> command dispatch
- *             ([0]=cmd, [1..6]=args; unknown cmds keep the echo response)
- *   uplink  : host GET_REPORT(Feature,0x05) -> response readback
- *   1 : enable (default; legacy SET->GET echo behavior preserved)
- *   0 : disable (original SDK 0x05 response behavior restored) */
+ * BibooUxTool), implemented by the vendor/user/host_link module:
+ *   interface: dedicated non-Boot vendor HID on EP3
+ *   downlink : Feature Report 0x09 via SET_REPORT
+ *   uplink   : Input Report 0x08 via Interrupt IN
+ *   1 : enable (default)
+ *   0 : disable */
 #ifndef BIBOO_UX_HOST_LINK
 #define BIBOO_UX_HOST_LINK		1
 #endif
@@ -212,15 +211,15 @@
 
 #if ((TL_AUDIO_MODE & TL_AUDIO_MASK_HID_SERVICE_CHANNEL) && (TL_AUDIO_MODE & TL_AUDIO_MASK_DONGLE_TO_STB))//HIDdongle to STB
 //////////// product  Information  //////////////////////////////
-#define ID_VENDOR				0x1d5a//0x248a			// for report
-#define ID_PRODUCT_BASE			0xc080//0x880C//AUDIO_HOGP
+#define ID_VENDOR				0x2657			// for report
+#define ID_PRODUCT_BASE			0x5862
 #define STRING_VENDOR			L"Telink"
 #define STRING_PRODUCT			L"BLE Remote KMA Dongle"
 #define STRING_SERIAL			L"TLSR8278"
 #else
 //////////// product  Information  //////////////////////////////
-#define ID_VENDOR				0x248a			// for report
-#define ID_PRODUCT_BASE			0x880C//AUDIO_HOGP
+#define ID_VENDOR				0x2657			// for report
+#define ID_PRODUCT_BASE			0x5862
 #define STRING_VENDOR			L"Telink"
 #define STRING_PRODUCT			L"BLE Remote KMA Dongle"
 #define STRING_SERIAL			L"TLSR8278"

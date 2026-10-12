@@ -6,7 +6,7 @@ namespace BibooUxTool
 {
     /// <summary>
     /// BibooHid.dll 的 P/Invoke 声明（x64，Cdecl）。
-    /// 通道：dongle report 0x05，payload 7 字节，双向 EP0 控制传输。
+    /// 下行使用 Feature Report 0x09；上行使用 Input Report 0x08。
     /// </summary>
     internal static class BibooHidNative
     {
@@ -24,6 +24,9 @@ namespace BibooUxTool
 
         [DllImport(DllName, CallingConvention = CC)]
         internal static extern int bh_read(IntPtr h, byte[] outPayload, int bufLen);
+
+        [DllImport(DllName, CallingConvention = CC)]
+        internal static extern int bh_read_timeout(IntPtr h, byte[] outPayload, int bufLen, int milliseconds);
 
         [DllImport(DllName, CallingConvention = CC)]
         internal static extern int bh_last_error(byte[] buf, int bufLen);

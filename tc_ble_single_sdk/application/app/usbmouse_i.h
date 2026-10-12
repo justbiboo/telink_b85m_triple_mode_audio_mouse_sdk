@@ -438,7 +438,6 @@ static const u8 mouse_report_desc[] =
 	0xb1,0x02,	   //feature (data, var, abs)
 	0xc0,		  //main, end collection
 #endif
-
 /*******************ota_cmd************************/
 #if 1
 	0x05,0x01,	   //global,  USAGE_PAGE 1 (Generic Desktop)

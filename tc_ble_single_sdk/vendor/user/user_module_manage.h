@@ -91,13 +91,7 @@ void user_module_voice_usb(void);
 void user_module_voice_usb_sine(void);
 #endif
 
-/* usb.c EP0 (SET_REPORT Feature,0x05): route a host command payload
- * (<=7 bytes, [0]=cmd) into the host_link module (downlink) */
 void user_module_host_link_rx(u8 len, u8 *p);
-
-/* usb.c EP0 (GET_REPORT Feature,0x05): pointer to the 7-byte response
- * payload served to the host (uplink readback) */
-u8  *user_module_host_link_tx_buf(void);
 
 #endif /* BIBOO_UX_USER_MODULE */
 
