@@ -27,6 +27,8 @@
 
 #include "simple_sdp.h"
 
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: master switch (BIBOO_UX_USER_MODULE) / per-module switches (BIBOO_UX_*)*/
+
 
 
 
@@ -53,6 +55,14 @@ const u8 my_SpeakerUUID[16]		= WRAPPING_BRACES(TELINK_SPEAKER_DATA);
 const u8 my_OtaUUID[16]			= WRAPPING_BRACES(TELINK_SPP_DATA_OTA);
 const u8 my_SppS2CUUID[16]		= WRAPPING_BRACES(TELINK_SPP_DATA_SERVER2CLIENT);
 const u8 my_SppC2SUUID[16]		= WRAPPING_BRACES(TELINK_SPP_DATA_CLIENT2SERVER);
+
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP) /*BIBOO UX: factory SPP data channel with the DUT mouse (0x33F3 write / 0x33F4 notify, see vendor/user/spp)*/
+u8  spp_my_write_handler = 0;	/*0x33F3: dongle -> mouse write handle*/
+u8  spp_my_read_handler  = 0;	/*0x33F4: mouse -> dongle notify handle*/
+
+u16 my_WriteOptUUID       = 0x33F3;
+u16 my_ReadOptUUID        = 0x33F4;
+#endif
 
 
 /**
@@ -92,6 +102,11 @@ void app_service_discovery(void)
 		conn_char_handler[7] = blm_att_findHandleOfUuid16 (db16, CHARACTERISTIC_UUID_HID_REPORT,
 					HID_REPORT_ID_AUDIO_FIRST_INPUT | (HID_REPORT_TYPE_INPUT<<8));				//Audio first report
 
+
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP) /*BIBOO UX: resolve the SPP write/notify handles (factory protocol)*/
+		spp_my_write_handler = blm_att_findHandleOfUuid16Noref (db16, my_WriteOptUUID);
+		spp_my_read_handler  = blm_att_findHandleOfUuid16Noref (db16, my_ReadOptUUID);
+#endif
 
 		if(sdp_get_handle_cb){
 			sdp_get_handle_cb(db16, db128);
@@ -251,6 +266,25 @@ u16 blm_att_findHandleOfUuid128 (att_db_uuid128_t *p, const u8 * uuid)
 	for (int i=0; i<p->num; i++)
 	{
 		if (memcmp (p[i].uuid, uuid, 16) == 0)
+		{
+			return p[i].handle;
+		}
+	}
+	return 0;
+}
+
+/**
+ * @brief       this function serves to find handle of uuid16 without the HID report reference
+ * @param[in]	p - pointer of data attribute
+ * @param[in]	uuid
+ * @return      0 - fail to find handle of uuid16
+ *              handle of uuid16 that find
+ */
+u16 blm_att_findHandleOfUuid16Noref (att_db_uuid16_t *p, u16 uuid)
+{
+	for (int i=0; i<p->num; i++)
+	{
+		if (p[i].uuid == uuid)
 		{
 			return p[i].handle;
 		}

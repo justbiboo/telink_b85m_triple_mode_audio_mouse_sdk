@@ -54,22 +54,47 @@ void ux_mouse_fwd_set_unpair_no_repair(void)
 
 /*blm_le_adv_report_event_handle (blm_host.c): auto pairing trigger (power-on /
  *after link loss, no button). accept only the mouse ADV signature to avoid
- *connecting to unrelated nearby BLE devices. two fixed layouts on mouse side:
+ *connecting to unrelated nearby BLE devices. three fixed layouts on mouse side:
  *  - MS swift-pair layout : [3]=len3 [4]=0x19(Appearance) [5..6]=0xC2,0x03 (0x03C2 mouse)
  *  - plain layout         : [3]=len3 [4]=0x03(UUID16 list) [5..6]=0x12,0x18 (0x1812 HID)
- *returns 1 to trigger pairing, 0 to ignore this ADV*/
+ *  - factory DUT layout : flags "02 01 05", first 0xFF data[+1..+2]=0x58,0x62
+  *(mass-production quick-connect, RSSI NOT checked)
+  *returns 1 to trigger pairing, 0 to ignore this ADV*/
 int ux_mouse_fwd_adv_auto_pair(void *pa_, s8 rssi)
 {
 	event_adv_report_t *pa = (event_adv_report_t *)pa_;
-	if(central_auto_pairing_enable && (rssi > -56) && (pa->len >= 7))
+	if(central_auto_pairing_enable)
 	{
-		if((pa->data[3] == 0x03) && (pa->data[4] == 0x19) && (pa->data[5] == 0xC2) && (pa->data[6] == 0x03))
+		/*factory quick-connect signature (mass-production dongle scan_req_handle):
+		 *flags "02 01 05", data[3]==0x03 and the two bytes right after the first
+		 *0xFF (manufacturer specific AD) == "0x58 0x62" (BIBOO ID_PRODUCT_BASE);
+		 *production DUT only, RSSI NOT checked (station can connect across the bench)*/
+		if((pa->len >= 7)
+			&& (pa->data[0] == 0x02) && (pa->data[1] == 0x01) && (pa->data[2] == 0x05) && (pa->data[3] == 0x03))
 		{
-			return 1;  //Appearance = 0x03C2 (mouse)
+			for(u8 i = 0; (i + 2) < pa->len; i++)
+			{
+				if(pa->data[i] == 0xFF)
+				{
+					if((pa->data[i + 1] == 0x58) && (pa->data[i + 2] == 0x62))
+					{
+						return 1;  //company marker 0x5862 (factory 5862 signature)
+					}
+					break;  //only the first 0xFF is examined (factory find_biboo_device_pos)
+				}
+			}
 		}
-		else if((pa->data[3] == 0x03) && (pa->data[4] == 0x03) && (pa->data[5] == 0x12) && (pa->data[6] == 0x18))
+
+		if((rssi > -56) && (pa->len >= 7))
 		{
-			return 1;  //uuid16 list contains 0x1812 (HID service)
+			if((pa->data[3] == 0x03) && (pa->data[4] == 0x19) && (pa->data[5] == 0xC2) && (pa->data[6] == 0x03))
+			{
+				return 1;  //Appearance = 0x03C2 (mouse)
+			}
+			else if((pa->data[3] == 0x03) && (pa->data[4] == 0x03) && (pa->data[5] == 0x12) && (pa->data[6] == 0x18))
+			{
+				return 1;  //uuid16 list contains 0x1812 (HID service)
+			}
 		}
 	}
 	return 0;
@@ -108,6 +133,12 @@ void ux_mouse_fwd_disconnect_evt(u8 reason)
  *  split big moves into several frames when |x| or |y| > 127*/
 void ux_mouse_fwd_att_mouse(u8 *p)
 {
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST)
+	if (user_module_factory_test_bypass(p))
+	{
+		return;	/*factory-test mode: report consumed as a 0xE1 PC event*/
+	}
+	#endif
 	#if (USB_MOUSE_ENABLE)
 	#if (MOUSE_DATA_LEN_AAA == 6)
 	mouse_data_t mouse_dat_report;

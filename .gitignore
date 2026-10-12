@@ -77,3 +77,6 @@ HIDApiTest_Telink_PC/BibooUxTool/**/bin/
 HIDApiTest_Telink_PC/BibooUxTool/**/obj/
 HIDApiTest_Telink_PC/BibooUxTool/**/*.user
 HIDApiTest_Telink_PC/BibooUxTool/build_log.txt
+
+#Test
+tc_ble_single_sdk_factory

@@ -250,8 +250,9 @@ void user_init(void)
 	 *(called from user_module_init()), see vendor/user/mouse_fwd*/
 
 	#if (BIBOO_UX_USER_MODULE)
-	/*BIBOO UX: init all vendor/user modules (currently none enabled on the dongle
-	 * side; the entry is wired here so future dongle UX modules need no app.c change)*/
+	/*BIBOO UX: init all vendor/user modules enabled on the dongle side
+	 *(spp/auth/led/factory_test/host_link + mouse_fwd/voice_dec); each
+	 *sub-module is internally gated by its own switch. See vendor/user/user_module_manage.c*/
 	user_module_init();
 	#endif
 
@@ -378,7 +379,8 @@ int main_idle_loop (void)
 	 *ux_voice_dec_ccc_proc() via user_module_proc(), see vendor/user/mouse_fwd & voice_dec*/
 
 	#if (BIBOO_UX_USER_MODULE)
-	/*BIBOO UX: proc all vendor/user modules (currently none enabled on the dongle side)*/
+	/*BIBOO UX: proc all vendor/user modules enabled on the dongle side, see
+	 *vendor/user/user_module_manage.c*/
 	user_module_proc();
 	#endif
 

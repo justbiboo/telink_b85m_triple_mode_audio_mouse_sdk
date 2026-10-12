@@ -533,6 +533,7 @@ extern void save_dev_info_flash();
 extern int cccWrite(void *p);
 extern int PC_enter_sleep(void *p);
 extern int cccWrite1(void *p);
+extern int sppWrite(void *p);	/*BIBOO UX: factory-test SPP write (0x33F3) handler, see AAA_app.c*/
 
 
 

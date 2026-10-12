@@ -84,6 +84,59 @@
 #define BIBOO_UX_DEBUG		    1
 #endif
 
+/* Factory SPP data channel with the DUT mouse, ported from the mass-production
+ * dongle SDK (tc_ble_single_sdk_factory):
+ *   write  0x33F3 (dongle -> mouse, 20-byte frames)
+ *   notify 0x33F4 (mouse -> dongle, dongle subscribes CCC)
+ *   handles resolved by the simple_sdp service discovery; the factory auth
+ *   protocol (0x77/0x78) rides on it. See vendor/user/spp.
+ *   1 : enable (default)
+ *   0 : disable */
+#ifndef BIBOO_UX_SPP
+#define BIBOO_UX_SPP			1
+#endif
+
+/* Factory authorization data layer (dongle side), ported from the
+ * mass-production dongle SDK (tc_ble_single_sdk_factory, user_data.c):
+ *   authorization tick stored in flash @0x70000 (FLASH_DEV_INFO_AAA, 32B),
+ *   default 10000, decremented once per successful AUTH (0x77) handshake
+ *   with the DUT mouse; drives the red LED and the auth handshake in
+ *   ux_spp.c. See vendor/user/user_data.
+ *   1 : enable (default)
+ *   0 : disable */
+#ifndef BIBOO_UX_AUTH
+#define BIBOO_UX_AUTH			1
+#endif
+
+/* Five-color LED state engine (dongle side), ported from the mass-production
+ * dongle SDK (factory user_module_manage.c led_*):
+ *   blue  = connected (blinks while not connected)
+ *   green = mouse activity (7ms moving window)
+ *   yellow= mouse button
+ *   red   = authorization tick (<2 on, <500 blink)
+ *   white = auth invalid
+ * Replaces the original red/white connection LEDs in blm_host.c.
+ * See vendor/user/led.
+ *   1 : enable (default)
+ *   0 : disable */
+#ifndef BIBOO_UX_LED
+#define BIBOO_UX_LED			1
+#endif
+
+/* Factory-test mode (dongle side, vendor/user/factory_test): the PC tool
+ * (BibooUxTool) drives a production test over the host link channel -
+ * mouse reports are bypassed to 0xE1 events, PC commands (0x10..0x13/0x40)
+ * are bridged to the DUT mouse over the factory SPP channel and DUT
+ * responses come back as 0xE3 events. Transparent (normal USB forwarding)
+ * until a 0x10 FT_START command arrives; requires BIBOO_UX_HOST_LINK
+ * (PC channel) and merges with the factory auth flow (0x77/0x78).
+ * Protocol: vendor/user/factory_test/ux_ft_proto.h.
+ *   1 : enable (default)
+ *   0 : disable */
+#ifndef BIBOO_UX_FACTORY_TEST
+#define BIBOO_UX_FACTORY_TEST	1
+#endif
+
 /* USB HID host communication channel (dongle <-> PC host tool, e.g.
  * BibooUxTool), implemented by the vendor/user/host_link module:
  *   interface: dedicated non-Boot vendor HID on EP3

@@ -513,6 +513,32 @@ static const u8 my_AppDataIn[5] = {
 	U16_LO(APP_DATA_IN_UUID), U16_HI(APP_DATA_IN_UUID)
 };
 
+#if (BIBOO_UX_FACTORY_TEST_DUT)
+/* ================ BIBOO UX: factory-test SPP service (0x33F0) ================
+ * 0x33F3 write (dongle -> mouse, 20B frames), 0x33F4 notify (mouse -> dongle).
+ * The dongle resolves both handles in app_service_discovery()
+ * (vendor/common/simple_sdp.c); the rows at the end of my_Attributes[] below
+ * must stay in the SPP_FT_* enum order (AAA_app_config.h). */
+#define FT_SPP_SERV_UUID	0x33F0
+#define FT_SPP_WRITE_UUID	0x33F3
+#define FT_SPP_NOTIFY_UUID	0x33F4
+
+const u16 my_ftSppServUUID = FT_SPP_SERV_UUID;
+u8 spp_ft_write_buf[20] = {0};
+u8 spp_ft_notify_buf[20] = {0};
+static u8 spp_ft_notify_ccc[2] = {0, 0};
+static const u8 spp_ft_write_char[5] = {
+	CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RSP,
+	U16_LO(SPP_FT_WRITE_CD_H), U16_HI(SPP_FT_WRITE_CD_H),
+	U16_LO(FT_SPP_WRITE_UUID), U16_HI(FT_SPP_WRITE_UUID)
+};
+static const u8 spp_ft_notify_char[5] = {
+	CHAR_PROP_READ | CHAR_PROP_NOTIFY,
+	U16_LO(SPP_FT_NOTIFY_CD_H), U16_HI(SPP_FT_NOTIFY_CD_H),
+	U16_LO(FT_SPP_NOTIFY_UUID), U16_HI(FT_SPP_NOTIFY_UUID)
+};
+#endif /* BIBOO_UX_FACTORY_TEST_DUT */
+
 
 
 
@@ -685,6 +711,17 @@ const attribute_t my_Attributes[] =
 	{0, ATT_PERMISSIONS_READ, 2, CHAR_2_LEN, (u8 *)(&my_characterUUID), (u8 *)(&my_AppDataIn[0]), 0},				 //prop
     {0, ATT_PERMISSIONS_RDWR, 2, sizeof(my_Data), (u8 *)(&my_AppDataIn[3]), (u8 *)(&my_Data), 0},	 //value
     {0, ATT_PERMISSIONS_RDWR, 2, 2, (u8 *)(&clientCharacterCfgUUID), (u8 *)(myDataInCCC), &cccWrite},
+
+#if (BIBOO_UX_FACTORY_TEST_DUT)
+    /* BIBOO UX: factory-test SPP service (0x33F0) - 6 rows, must match the
+     * SPP_FT_* enum order in AAA_app_config.h */
+    {6, ATT_PERMISSIONS_READ, 2, 2, (u8 *)(&my_primaryServiceUUID), (u8 *)(&my_ftSppServUUID), 0},
+    {0, ATT_PERMISSIONS_READ, 2, CHAR_2_LEN, (u8 *)(&my_characterUUID), (u8 *)(&spp_ft_write_char[0]), 0},			 //prop
+    {0, ATT_PERMISSIONS_WRITE, 2, sizeof(spp_ft_write_buf), (u8 *)(&spp_ft_write_char[3]), (u8 *)(spp_ft_write_buf), &sppWrite},	 //value (0x33F3)
+    {0, ATT_PERMISSIONS_READ, 2, CHAR_2_LEN, (u8 *)(&my_characterUUID), (u8 *)(&spp_ft_notify_char[0]), 0},			 //prop
+    {0, ATT_PERMISSIONS_READ, 2, sizeof(spp_ft_notify_buf), (u8 *)(&spp_ft_notify_char[3]), (u8 *)(spp_ft_notify_buf), 0},	 //value (0x33F4)
+    {0, ATT_PERMISSIONS_RDWR, 2, 2, (u8 *)(&clientCharacterCfgUUID), (u8 *)(spp_ft_notify_ccc), &cccWrite},
+#endif
 
 
 };

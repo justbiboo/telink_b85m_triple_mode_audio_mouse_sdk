@@ -18,6 +18,7 @@ namespace BibooUxTool
         private volatile bool _readerRunning;
 
         private GradientButton _btnConnect;
+        private GradientButton _btnFactory;
         private Label _lblStatus;
         private Label _lblPath;
         private TextBox _txtPayload;
@@ -85,13 +86,20 @@ namespace BibooUxTool
             _lblStatus.TextAlign = ContentAlignment.MiddleLeft;
 
             _lblPath = new Label();
-            _lblPath.SetBounds(232, 38, 512, 22);
+            _lblPath.SetBounds(232, 38, 412, 22);
             _lblPath.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblPath.TextAlign = ContentAlignment.MiddleLeft;
             _lblPath.AutoEllipsis = true;
             _lblPath.ForeColor = UiTheme.TextSub;
 
-            cardDevice.Controls.AddRange(new Control[] { _btnConnect, _lblStatus, _lblPath });
+            _btnFactory = new GradientButton();
+            _btnFactory.SetBounds(656, 34, 84, 30);
+            _btnFactory.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnFactory.Text = "产测页";
+            _btnFactory.IsPrimary = false;
+            _btnFactory.Click += OnOpenFactory;
+
+            cardDevice.Controls.AddRange(new Control[] { _btnConnect, _lblStatus, _lblPath, _btnFactory });
 
             // 发送
             var cardSend = new RoundedPanel();
@@ -238,6 +246,25 @@ namespace BibooUxTool
                 ResetConnectionAfterError();
                 LogLine("连接异常（" + ex.GetType().Name + "）：" + ex.Message, UiTheme.Danger);
             }
+        }
+
+        private void OnOpenFactory(object sender, EventArgs e)
+        {
+            if (_link.IsConnected)
+            {
+                // 产测页自持独立 DongleLink：同一 HID 通道需独占，先停读线程并断开。
+                StopReader();
+                _link.Disconnect();
+                UpdateConnUi(false);
+                LogLine("已断开（进入产测页需独占 HID 通道）。", UiTheme.TextSub);
+            }
+
+            using (var ft = new FactoryTestForm())
+            {
+                ft.ShowDialog(this);
+            }
+
+            LogLine("已从产测页返回。", UiTheme.TextSub);
         }
 
         private void ResetConnectionAfterError()

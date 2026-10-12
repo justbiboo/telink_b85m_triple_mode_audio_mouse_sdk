@@ -19,6 +19,7 @@
 #include "application/usbstd/usb.h"
 #include "drivers.h"
 #include "stack/ble/controller/ble_controller.h"	/* blc_ll_getCurrentState, BLS_LINK_STATE_CONN (mouse link up test); NOTE: ll.h alone is not self-contained - blt_event_callback_t comes from controller.h, use the ble_controller.h umbrella */
+#include "vendor/user/factory_test/ux_factory_test.h"	/*BIBOO UX: factory-test commands 0x10..0x13/0x40 (BIBOO_UX_FACTORY_TEST)*/
 
 
 /*----------------------------------------------------------------------------
@@ -30,6 +31,9 @@
  *   0x01       : IDENT - module presence & version probe
  *   0x02       : TEST beacon - 1s periodic uplink while the mouse link is up
  *   0x03..0x7f : reserved for business commands (dongle side features)
+ *   0x10..0x13 : factory-test control cmds (FT_START/STOP/STATUS/DUT_DISCONNECT,
+ *                see vendor/user/factory_test + ux_ft_proto.h)
+ *   0x40       : factory-test FT_FWD fragment (bridged to the DUT mouse)
  *   0x80..     : reserved for debug commands
  * Heavy commands must NOT run in the EP0 irq: their dispatch() case should
  * only set a pending flag, the real work happens in ux_host_link_proc()
@@ -120,6 +124,14 @@ static void ux_hlink_dump(const char *tag, const u8 *p, u8 len)
  * unknown commands simply return and keep the echo response.*/
 static void ux_host_link_dispatch(const u8 *p, u8 *r)
 {
+#if (BIBOO_UX_FACTORY_TEST)
+	/*BIBOO UX: factory-test commands (0x10..0x13 / 0x40, see ux_factory_test.c);
+	 *returns 1 with r filled when p[0] is a factory-test command*/
+	if (ux_ft_host_cmd(p, r))
+	{
+		return;
+	}
+#endif
 	switch (p[0])
 	{
 		case UX_HLINK_CMD_IDENT:
@@ -200,6 +212,16 @@ static void ux_host_link_beacon_proc(void)
 		tick = 0;	/*link down: reset, first frame goes out right after (re)connect*/
 		return;
 	}
+#if (BIBOO_UX_FACTORY_TEST)
+	/*BIBOO UX: pause while the factory-test mode is active (its 0xE1/0xE2/0xE3
+	 *events replace the beacon; tick keeps rolling so the first beacon after
+	 *FT_STOP is one period away)*/
+	if (ux_ft_host_active())
+	{
+		tick = clock_time();
+		return;
+	}
+#endif
 	if (!clock_time_exceed(tick, UX_HLINK_BEACON_MS * 1000))
 	{
 		return;

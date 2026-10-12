@@ -110,6 +110,15 @@ int host_att_register_idle_func (void *p);
 u16 blm_att_findHandleOfUuid16 (att_db_uuid16_t *p, u16 uuid, u16 ref);
 
 /**
+ * @brief       this function serves to find handle of uuid16 without the HID report reference
+ * @param[in]	p - pointer of data attribute
+ * @param[in]	uuid
+ * @return      0 - fail to find handle of uuid16
+ *              handle of uuid16 that find
+ */
+u16 blm_att_findHandleOfUuid16Noref (att_db_uuid16_t *p, u16 uuid);
+
+/**
  * @brief       this function serves to find handle of uuid128
  * @param[in]	p - pointer of data attribute
  * @param[in]	uuid - pointer of uuid

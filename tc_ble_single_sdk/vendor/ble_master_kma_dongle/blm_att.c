@@ -31,6 +31,7 @@
 
 #include "application/keyboard/keyboard.h"
 #include "application/app/usbmouse.h"
+#include "vendor/user/spp/ux_spp.h"			/*BIBOO UX: SPP data channel API/handles (BIBOO_UX_SPP, see vendor/user/spp)*/
 #include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module hooks (mouse_fwd)*/
 
 #define     TELINK_UNPAIR_KEYVALUE		0xFF  //conn state, unpair
@@ -65,6 +66,9 @@ extern void usbmouse_add_frame (mouse_data_t *packet_mouse, int packet_num);
 void	att_mouse (u16 conn, u8 *p)
 {
 	(void)conn;
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
+	user_module_att_mouse_led(p);	/*BIBOO UX: yellow=button, green=activity (vendor/user/led)*/
+#endif
 #if (USB_MOUSE_ENABLE)
 #if (MOUSE_DATA_LEN_AAA == 6)
 	/* mouse BLE report (MOUSE_DATA_LEN_AAA = 6, e.g. 8258_dual_mouse):
@@ -100,6 +104,23 @@ void	att_mouse (u16 conn, u8 *p)
 
 }
 
+
+
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP) /*BIBOO UX: SPP data channel with the DUT mouse (0x33F3/0x33F4, factory protocol; see vendor/user/spp)*/
+
+/**
+ * @brief       call this function when the mouse notifies on the SPP notify characteristic (0x33F4)
+ * @param[in]	conn - connect handle
+ * @param[in]	p - pointer of l2cap data packet
+ * @param[in]	len - data length
+ * @return      none
+ */
+void	att_spp (u16 conn, u8 *p, u8 len)
+{
+	(void)conn;
+	ux_spp_on_receive_data (p, len);
+}
+#endif
 
 
 extern void usbkb_hid_report(kb_data_t *data);

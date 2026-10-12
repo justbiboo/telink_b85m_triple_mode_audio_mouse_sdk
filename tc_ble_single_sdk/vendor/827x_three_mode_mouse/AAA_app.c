@@ -21,6 +21,8 @@
  *******************************************************************************************************/
 
 #include "AAA_public_config.h"
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module entry (ux_mic_stream, ...)*/
+#include "vendor/user/factory_test/ux_ft_dut.h"	/*BIBOO UX: DUT-side factory test (sppWrite 0x33F3 -> ux_ft_dut_rx)*/
 //#include "../application/audio/tl_audio.h"
 
 #define  CUST_SAVE_MASTER_INFO_ENABLE_AAA      1
@@ -174,6 +176,21 @@ _attribute_data_retention_user u8	tbl_advData_aaa[31] =
 };
 #endif
 
+#if (BIBOO_UX_FACTORY_TEST_DUT)
+/* ================ BIBOO UX: factory-test ADV template (18B) ================
+ * Forced at the end of set_adv_scanRsp_data(): same layout as the templates
+ * above, but the manufacturer-specific AD carries the factory signature
+ * "0x58 0x62" (right after 0xFF) required by the production dongle
+ * (ux_mouse_fwd_adv_auto_pair, vendor/user/mouse_fwd/ux_mouse_fwd.c). */
+_attribute_data_retention_user u8	tbl_ftAdvData_aaa[18] =
+{
+	0x02, 0x01, 0x05,	// BLE limited discoverable mode and BR/EDR not supported
+	0x03, 0x19, 0xC2, 0x03,	// appearance: mouse (0x03C2)
+	0x03, 0x03, 0x12, 0x18,	// incomplete list of service class UUIDs (0x1812-HID SERVICE)
+	0x06, 0xff, 0x58, 0x62, 0x03, 0x00, 0x80,	// manufacturer specific data, BIBOO UX factory signature
+};
+#endif
+
 #if (DEVICE_NAME_INCLUDE_MAC_DEBUG)//dev inc mac
 
 /**
@@ -243,6 +260,13 @@ void set_adv_scanRsp_data()
     tbl_advData_aaa[DEV_POSITION - 2] = device_name_len + 1;//data len
     bls_ll_setAdvData((u8 *)tbl_advData_aaa, device_name_len + DEV_POSITION);//set adv data
     bls_ll_setScanRspData(&tbl_advData_aaa[DEV_POSITION - 2], device_name_len + 2);//set scan rsp data
+
+#if (BIBOO_UX_FACTORY_TEST_DUT)
+    /* BIBOO UX: production firmware - force the factory ADV signature (58 62)
+     * on top of the template above, so the production dongle always filters
+     * this DUT (see ux_mouse_fwd_adv_auto_pair) */
+    bls_ll_setAdvData((u8 *)tbl_ftAdvData_aaa, sizeof(tbl_ftAdvData_aaa));
+#endif
 }
 
 
@@ -352,6 +376,25 @@ int cccWrite1(void *p)
 {
     return 0;
 }
+
+#if (BIBOO_UX_FACTORY_TEST_DUT)
+/**
+ * @brief       BIBOO UX: factory-test SPP write (0x33F3) handler, attached to
+ *              the spp_ft_write_char row of my_Attributes[] (AAA_app_att.c)
+ * @param[in]   p	- rf_packet_att_write_t *
+ * @return      0
+ * @note        runs in the ATT rx context: the frame is only buffered, the
+ *              response is sent from ux_ft_dut_proc() (vendor/user/factory_test)
+ */
+int sppWrite(void *p)
+{
+	rf_packet_att_write_t *src = (rf_packet_att_write_t *)p;
+
+	ux_ft_dut_rx(&src->value, (u8)(src->l2capLen - 3));
+
+	return 0;
+}
+#endif
 
 
 /**
@@ -1119,6 +1162,14 @@ void user_init_normal(void)
     blt_soft_timer_init();//init soft timer
 #endif
     start_tick = clock_time();//update start tick
+
+	/* ================ BIBOO UX: vendor/user module init entry ================
+	 * one-time init of every UX sub-module under vendor/user/ (mic stream,
+	 * mouse_fwd, ft_dut, ft_touch, ...); each sub-module is internally
+	 * gated by its own switch. See vendor/user/user_module_manage.c */
+#if (BIBOO_UX_USER_MODULE)
+	user_module_init();
+#endif
 }
 
 
@@ -1665,6 +1716,14 @@ void main_loop(void)
     user_requestMtuSizeExchange();
 #endif
 	proc_audio_ble();
+
+	/* ================ BIBOO UX: vendor/user module entry ================
+	 * dispatches every UX sub-module under vendor/user/ (mic stream, ...);
+	 * each sub-module is internally gated by its own switch
+	 * (BIBOO_UX_MIC_STREAM, ...). See vendor/user/user_module_manage.c */
+#if (BIBOO_UX_USER_MODULE)
+	user_module_proc();
+#endif
     u16 time_interval = 4500;
 
 #if(BLT_SOFTWARE_TIMER_ENABLE)

@@ -20,6 +20,12 @@
 #include "mouse_fwd/ux_mouse_fwd.h"
 #include "voice_dec/ux_voice_dec.h"
 #include "host_link/ux_host_link.h"
+#include "spp/ux_spp.h"
+#include "user_data/ux_user_data.h"
+#include "led/ux_led.h"
+#include "factory_test/ux_factory_test.h"
+#include "factory_test/ux_ft_dut.h"	/*BIBOO UX: DUT-side factory test (mouse builds only, see switch BIBOO_UX_FACTORY_TEST_DUT)*/
+#include "factory_test/ux_ft_touch.h"	/*BIBOO UX: DUT-side touch sample source (0x22 events, weak driver adapter)*/
 #endif
 
 
@@ -38,6 +44,22 @@ void user_module_init(void)
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
 	ux_host_link_init();	/*BIBOO UX: reset host link (HID 0x05) channel state*/
 #endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP)
+	ux_spp_init();		/*BIBOO UX: factory SPP data channel (0x33F3/0x33F4, see vendor/user/spp)*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
+	ux_led_init();		/*BIBOO UX: five-color LED engine (see vendor/user/led)*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_AUTH)
+	ux_user_data_init();	/*BIBOO UX: authorization tick data layer (flash 0x70000, see vendor/user/user_data)*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST)
+	ux_factory_test_init();	/*BIBOO UX: factory-test module (host link 0x10..0x13/0x40 + SPP bridging)*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST_DUT)
+	ux_ft_dut_init();	/*BIBOO UX: DUT-side factory test (SPP 0x33F3/0x33F4 + auth flash + AES)*/
+	ux_ft_touch_init();	/*BIBOO UX: touch sample source (weak simulated driver, real IC overrides)*/
+#endif
 }
 
 /* user module loop entry (see user_module_manage.h for the hook locations) */
@@ -55,6 +77,22 @@ void user_module_proc(void)
 #endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
 	ux_host_link_proc();		/*BIBOO UX: async host link command extension point*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP)
+	ux_spp_proc();			/*BIBOO UX: SPP rx housekeeping (reserved for production test)*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
+	ux_led_proc();			/*BIBOO UX: non-blocking LED blink engine + mouse activity window*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_AUTH)
+	ux_user_data_proc();	/*BIBOO UX: 1s tick LED indication + DUT auth state polling (0x78)*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST)
+	ux_factory_test_proc();	/*BIBOO UX: FT frame bridge / DUT link events / reply timeout*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST_DUT)
+	ux_ft_dut_proc();		/*BIBOO UX: DUT-side factory test command loop (0x33F3 rx fifo)*/
+	ux_ft_touch_proc();		/*BIBOO UX: 20ms touch sampling while the 0x22 event stream is on*/
 #endif
 }
 
@@ -89,6 +127,22 @@ void user_module_att_mouse(u8 *p)
 {
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_MOUSE_FWD)
 	ux_mouse_fwd_att_mouse(p);
+#endif
+}
+
+void user_module_att_mouse_led(u8 *p)
+{
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
+	ux_led_att_mouse(p);
+#endif
+}
+
+int user_module_factory_test_bypass(u8 *p)
+{
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST)
+	return ux_ft_mouse_bypass(p);
+#else
+	return 0;
 #endif
 }
 

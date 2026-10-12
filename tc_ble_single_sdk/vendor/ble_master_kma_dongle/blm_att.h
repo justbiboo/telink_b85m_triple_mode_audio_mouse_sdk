@@ -58,6 +58,15 @@ void	att_keyboard_media (u16 conn, u8 *p);
 void 	att_mouse(u16 conn, u8 *p);
 
 /**
+ * @brief       call this function when the mouse notifies on the SPP notify characteristic (0x33F4)
+ * @param[in]	conn - connect handle
+ * @param[in]	p - pointer of l2cap data packet
+ * @param[in]	len - data length
+ * @return      none
+ */
+void 	att_spp(u16 conn, u8 *p, u8 len);
+
+/**
  * @brief       this function serves to clear host attribute data
  * @param[in]	none
  * @return      none

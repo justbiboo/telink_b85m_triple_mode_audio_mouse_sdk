@@ -44,8 +44,8 @@
 
 
 /* user module init entry: called once at the end of user_init()
- * (currently wired on the dongle side; wire into the mouse
- * user_init_normal() as well when a mouse module needs init) */
+ * (wired on both the dongle (app.c user_init) and the mouse
+ * (AAA_app.c user_init_normal)) */
 void user_module_init(void);
 
 /* user module loop entry: called in the firmware main loop */
@@ -75,6 +75,18 @@ void user_module_unpair_triggered(void);
 /* att_mouse (blm_att.c): convert the 6-byte BLE mouse report (btn+s16x+
  * s16y+wheel) to 4-byte USB HID frames and queue them for USB */
 void user_module_att_mouse(u8 *p);
+
+/* att_mouse (blm_att.c): mouse movement/button LED indication (green =
+ * activity, yellow = button; report parsed per MOUSE_DATA_LEN_AAA),
+ * implemented by the vendor/user/led module */
+void user_module_att_mouse_led(u8 *p);
+
+/* ux_mouse_fwd_att_mouse (ux_mouse_fwd.c): factory-test bypass hook -
+ * while the factory-test mode is active the BLE mouse report is reported
+ * to the PC (host link 0xE1 event) instead of being forwarded to USB.
+ * returns 1 to skip the USB forwarding.
+ * implemented by the vendor/user/factory_test module */
+int  user_module_factory_test_bypass(u8 *p);
 
 /* blm_host.c L2CAP notify dispatch: current value handle of the mouse
  * voice characteristic (my_Data 0xB03E); 0 = not discovered yet */

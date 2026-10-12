@@ -179,6 +179,24 @@ static inline void no_printf(const char *format, ...){    return;}
 #define BIBOO_UX_K5_CTRL_WIN_MIC	1
 #endif
 
+/* ================ BIBOO UX: DUT-side factory test ================ */
+/* Production-test responder on the mouse side (vendor/user/factory_test/
+ * ux_ft_dut.*). The mouse exposes the factory SPP service (ATT 0x33F0,
+ * write 0x33F3 / notify 0x33F4), answers the factory auth pair 0x77/0x78
+ * (record in flash 0x70000) and the extended commands PING/AES_ENC/AES_DEC/
+ * AUTH/TOUCH (protocol: vendor/user/factory_test/ux_ft_proto.h, surface 2).
+ * While enabled the ADV payload is forced to carry the factory signature
+ * "58 62", so the production dongle auto-pairs (set_adv_scanRsp_data).
+ *   1 : enable (production firmware, default)
+ *   0 : disable (original SDK behavior) */
+#ifndef BIBOO_UX_FACTORY_TEST_DUT
+#define BIBOO_UX_FACTORY_TEST_DUT	1
+#endif
+/* model id reported by the PING command (0x58: 8258 dual mouse) */
+#ifndef BIBOO_UX_FT_DUT_MODEL
+#define BIBOO_UX_FT_DUT_MODEL	0x58
+#endif
+
 
 //--------------Debug gpio-------------------
 
@@ -391,6 +409,15 @@ typedef enum
     MY_DATA_INPUT_CD_H,
     MY_DATA_INPUT_DP_H,
     MY_DATA_INPUT_CCB_H,
+
+    /* BIBOO UX: factory-test SPP service (0x33F0), rows at the end of
+     * my_Attributes[] in AAA_app_att.c; keep the row order in sync */
+    SPP_FT_PS_H,
+    SPP_FT_WRITE_CD_H,
+    SPP_FT_WRITE_DP_H,
+    SPP_FT_NOTIFY_CD_H,
+    SPP_FT_NOTIFY_DP_H,
+    SPP_FT_NOTIFY_CCB_H,
 
     ATT_END_H,
 

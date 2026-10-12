@@ -33,7 +33,9 @@
 #include "application/audio/audio_config.h"
 #include "application/audio/tl_audio.h"
 #include "app_audio.h"
+#include "vendor/user/spp/ux_spp.h"			/*BIBOO UX: SPP data channel API/handles (BIBOO_UX_SPP, see vendor/user/spp)*/
 #include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module hooks (mouse_fwd, voice_dec)*/
+#include "vendor/user/led/ux_led.h"			/*BIBOO UX: five-color LED engine (BIBOO_UX_LED, see vendor/user/led)*/
 
 
 extern u8 read_by_type_req_uuidLen;
@@ -332,8 +334,13 @@ int blm_le_connection_establish_event_handle(u8 *p)
 		#if (UI_LED_ENABLE)
 			//led show connection state
 			master_connected_led_on = 1;
+			#if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
+			ux_led_set(UX_LED_BLUE, UX_LED_ON);		/*BIBOO UX: blue on = connected*/
+			ux_led_set(UX_LED_WHITE, UX_LED_OFF);	/*BIBOO UX: white re-checked by the auth state polling*/
+			#else
 			gpio_write(GPIO_LED_RED, LED_ON_LEVEL);     //red on
 			gpio_write(GPIO_LED_WHITE, !LED_ON_LEVEL);  //white off
+			#endif
 		#endif
 
 
@@ -415,8 +422,12 @@ int 	blm_disconnect_event_handle(u8 *p)
 		//led show none connection state
 		if(master_connected_led_on){
 			master_connected_led_on = 0;
+			#if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
+			ux_led_all_off();	/*BIBOO UX: all off; blue blinks again via ux_user_data_proc (not connected)*/
+			#else
 			gpio_write(GPIO_LED_WHITE, LED_ON_LEVEL);   //white on
 			gpio_write(GPIO_LED_RED, !LED_ON_LEVEL);    //red off
+			#endif
 		}
 	#endif
 
@@ -892,6 +903,13 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 				dbg_mouse_cnt++;
 				#endif
 				att_mouse(conn_handle, pAtt->dat);
+			}
+			#endif
+
+			#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP) /*BIBOO UX: route the mouse SPP notify (0x33F4) to ux_spp (vendor/user/spp)*/
+			else if(attHandle && attHandle == spp_my_read_handler)
+			{
+				att_spp(conn_handle, pAtt->dat, (u8)(pAtt->l2capLen - 3));
 			}
 			#endif
 
