@@ -39,7 +39,10 @@ hid_device* handle;
 #define HLINK_USAGE                0x0001
 #define HLINK_FEATURE_REPORT_ID    0x09
 #define HLINK_INPUT_REPORT_ID      0x08
-#define HLINK_REPORT_SIZE          8
+#define HLINK_FEATURE_PAYLOAD_SIZE 15
+#define HLINK_INPUT_PAYLOAD_SIZE   15
+#define HLINK_FEATURE_REPORT_SIZE  (HLINK_FEATURE_PAYLOAD_SIZE + 1)
+#define HLINK_INPUT_REPORT_SIZE    (HLINK_INPUT_PAYLOAD_SIZE + 1)
 
 int main(int argc, char* argv[])
 {
@@ -92,7 +95,7 @@ int main(int argc, char* argv[])
 	hid_set_nonblocking(handle, 0);
 	printf("host link path: %s\n", host_link_path);
 
-	unsigned char buf[HLINK_REPORT_SIZE];
+	unsigned char buf[HLINK_FEATURE_REPORT_SIZE];
 	memset(buf, 0, sizeof(buf));
 	buf[0] = HLINK_FEATURE_REPORT_ID;
 	buf[1] = 0x01;
@@ -105,14 +108,14 @@ int main(int argc, char* argv[])
 	}
 
 	{
-		unsigned char rbuf[HLINK_REPORT_SIZE];
+		unsigned char rbuf[HLINK_INPUT_REPORT_SIZE];
 		printf("waiting for Input Report 0x%02X ...\n", HLINK_INPUT_REPORT_ID);
 		res = hid_read(handle, rbuf, sizeof(rbuf));
 		printf("hid_read ret=%d:\n  ", res);
-		for (int i = 0; i < HLINK_REPORT_SIZE && i < res; i++)
+		for (int i = 0; i < HLINK_INPUT_REPORT_SIZE && i < res; i++)
 			printf("%02hhx ", rbuf[i]);
 		printf("\n");
-		if (res == HLINK_REPORT_SIZE && rbuf[0] == HLINK_INPUT_REPORT_ID && rbuf[1] == 0x01)
+		if (res == HLINK_INPUT_REPORT_SIZE && rbuf[0] == HLINK_INPUT_REPORT_ID && rbuf[1] == 0x01)
 			printf("INPUT REPORT OK\n");
 		else
 			printf("INPUT REPORT MISMATCH\n");

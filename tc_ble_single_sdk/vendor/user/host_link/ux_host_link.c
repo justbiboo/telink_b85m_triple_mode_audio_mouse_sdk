@@ -44,8 +44,9 @@
 #define UX_HLINK_MAGIC1      0xB0
 #define UX_HLINK_VERSION     0x01
 
-#define UX_HLINK_PAYLOAD      UX_HLINK_REPORT_PAYLOAD_SIZE
-#define UX_HLINK_TX_FIFO_NUM  8
+#define UX_HLINK_FEATURE_PAYLOAD  UX_HLINK_FEATURE_REPORT_PAYLOAD_SIZE
+#define UX_HLINK_INPUT_PAYLOAD    UX_HLINK_INPUT_REPORT_PAYLOAD_SIZE
+#define UX_HLINK_TX_FIFO_NUM      8
 
 static const u8 ux_hlink_report_desc[UX_HLINK_REPORT_DESC_SIZE] = {
 	0x06,0x00,0xff,
@@ -56,20 +57,20 @@ static const u8 ux_hlink_report_desc[UX_HLINK_REPORT_DESC_SIZE] = {
 	0x15,0x00,
 	0x26,0xff,0x00,
 	0x75,0x08,
-	0x95,UX_HLINK_PAYLOAD,
+	0x95,UX_HLINK_FEATURE_PAYLOAD,
 	0xb1,0x02,
 	0x85,UX_HLINK_INPUT_REPORT_ID,
 	0x09,0x02,
 	0x15,0x00,
 	0x26,0xff,0x00,
 	0x75,0x08,
-	0x95,UX_HLINK_PAYLOAD,
+	0x95,UX_HLINK_INPUT_PAYLOAD,
 	0x81,0x02,
 	0xc0,
 };
 
-static u8 ux_hlink_rx_buf[UX_HLINK_PAYLOAD];
-static u8 ux_hlink_tx_fifo[UX_HLINK_TX_FIFO_NUM][UX_HLINK_PAYLOAD];
+static u8 ux_hlink_rx_buf[UX_HLINK_FEATURE_PAYLOAD];
+static u8 ux_hlink_tx_fifo[UX_HLINK_TX_FIFO_NUM][UX_HLINK_INPUT_PAYLOAD];
 static volatile u8 ux_hlink_tx_wptr = 0;
 static volatile u8 ux_hlink_tx_rptr = 0;
 static volatile u8 ux_hlink_rx_seq = 0;
@@ -114,8 +115,8 @@ static void ux_hlink_dump(const char *tag, const u8 *p, u8 len)
 
 
 /*synchronous command dispatch, called from ux_host_link_rx (EP0 irq).
- * p = 7-byte command payload ([0]=cmd, [1..6]=args);
- * r = 7-byte response buffer, already mirroring p (echo) on entry, so
+ * p = 15-byte command payload ([0]=cmd, [1..14]=args);
+ * r = 15-byte Input response buffer, already mirroring p (echo) on entry, so
  * unknown commands simply return and keep the echo response.*/
 static void ux_host_link_dispatch(const u8 *p, u8 *r)
 {
@@ -155,19 +156,19 @@ void ux_host_link_init(void)
 void ux_host_link_rx(u8 len, u8 *p)
 {
 	u8 i;
-	u8 response[UX_HLINK_PAYLOAD] = {0};
-	if (len > UX_HLINK_PAYLOAD) { len = UX_HLINK_PAYLOAD; }
+	u8 response[UX_HLINK_INPUT_PAYLOAD] = {0};
+	if (len > UX_HLINK_FEATURE_PAYLOAD) { len = UX_HLINK_FEATURE_PAYLOAD; }
 	for (i = 0; i < len; i++)
 	{
 		ux_hlink_rx_buf[i] = p[i];
 		response[i] = p[i];
 	}
-	for (; i < UX_HLINK_PAYLOAD; i++)
+	for (; i < UX_HLINK_FEATURE_PAYLOAD; i++)
 	{
 		ux_hlink_rx_buf[i] = 0;
 	}
 	ux_host_link_dispatch(ux_hlink_rx_buf, response);
-	ux_host_link_tx(UX_HLINK_PAYLOAD, response);
+	ux_host_link_tx(UX_HLINK_INPUT_PAYLOAD, response);
 	ux_hlink_rx_seq ++;
 	#if (BIBOO_UX_DEBUG)
 	dbg_hrx_cnt ++;
@@ -191,7 +192,7 @@ static void ux_host_link_beacon_proc(void)
 {
 	static u32 tick = 0;
 	static u8 seq = 0;
-	u8 pay[UX_HLINK_PAYLOAD];
+	u8 pay[UX_HLINK_INPUT_PAYLOAD];
 	u8 i;
 
 	if (blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
@@ -207,11 +208,11 @@ static void ux_host_link_beacon_proc(void)
 	seq ++;
 	pay[0] = UX_HLINK_CMD_BEACON;	/*test beacon command id*/
 	pay[1] = seq;					/*rolling sequence - host checks liveness with it*/
-	for (i = 2; i < UX_HLINK_PAYLOAD; i++)
+	for (i = 2; i < UX_HLINK_INPUT_PAYLOAD; i++)
 	{
 		pay[i] = 0;
 	}
-	ux_host_link_tx(UX_HLINK_PAYLOAD, pay);	/*dumps "[HLINK] TX:" on the debug uart*/
+	ux_host_link_tx(UX_HLINK_INPUT_PAYLOAD, pay);	/*dumps "[HLINK] TX:" on the debug uart*/
 }
 #endif
 
@@ -220,7 +221,7 @@ static void ux_host_link_send_input_report(const u8 *report)
 {
 	reg_usb_ep_ptr(USB_EDP_APP_IN) = 0;
 	reg_usb_ep_dat(USB_EDP_APP_IN) = UX_HLINK_INPUT_REPORT_ID;
-	foreach(i, UX_HLINK_PAYLOAD)
+	foreach(i, UX_HLINK_INPUT_PAYLOAD)
 	{
 		reg_usb_ep_dat(USB_EDP_APP_IN) = report[i];
 	}
@@ -230,7 +231,7 @@ static void ux_host_link_send_input_report(const u8 *report)
 
 static void ux_host_link_tx_proc(void)
 {
-	u8 report[UX_HLINK_PAYLOAD];
+	u8 report[UX_HLINK_INPUT_PAYLOAD];
 	u8 irq_en;
 
 	if (usbhw_is_ep_busy(USB_EDP_APP_IN))
@@ -268,11 +269,11 @@ void ux_host_link_proc(void)
 
 void ux_host_link_tx(u8 len, u8 *p)
 {
-	u8 report[UX_HLINK_PAYLOAD] = {0};
+	u8 report[UX_HLINK_INPUT_PAYLOAD] = {0};
 	u8 next_wptr;
 	u8 irq_en;
 
-	if (len > UX_HLINK_PAYLOAD) { len = UX_HLINK_PAYLOAD; }
+	if (len > UX_HLINK_INPUT_PAYLOAD) { len = UX_HLINK_INPUT_PAYLOAD; }
 	memcpy(report, p, len);
 
 	irq_en = irq_disable();
@@ -293,7 +294,7 @@ void ux_host_link_tx(u8 len, u8 *p)
 	dbg_htx_cnt ++;
 	#endif
 	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_DEBUG)
-	ux_hlink_dump("[HLINK] TX: ", report, UX_HLINK_PAYLOAD);
+	ux_hlink_dump("[HLINK] TX: ", report, UX_HLINK_INPUT_PAYLOAD);
 	#endif
 }
 

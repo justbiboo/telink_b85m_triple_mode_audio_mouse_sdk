@@ -67,6 +67,9 @@ u8		host_cmd_pairing_ok = 0;
 /*BIBOO: host commands use SET_REPORT(Feature,0x09); host_link sends
  *responses and events as Input Report 0x08 through its dedicated EP3 HID
  *interface. Channel state and command dispatch live in host_link.c.*/
+static u8 ux_hlink_feature_rx_buf[UX_HLINK_FEATURE_REPORT_PAYLOAD_SIZE + 1];
+static u8 ux_hlink_feature_rx_received;
+static u8 ux_hlink_feature_rx_remaining;
 #endif
 static USB_Request_Hdr_t control_request;
 static u8 * g_response = 0;
@@ -450,28 +453,38 @@ void usb_handle_out_class_intf_req(int data_request) {
 		/*BIBOO: the host SET_REPORT(Feature,0x09) arrives HERE, not in the
 		 *Feature-typed case above: the host wValue is 0x0309 (report type 3 =
 		 *Feature per the USB HID spec), while the SDK enum maps standard type 3
-		 *to HID_REPORT_CUSTOM (its Feature value is 2). The wire data stage is
-		 *8 bytes: [0]=report id 0x09, [1..7]=payload. Route the payload into
-		 *the vendor/user/host_link module only when the request targets the
-		 *dedicated host link interface.*/
+		 *to HID_REPORT_CUSTOM (its Feature value is 2). The 16-byte wire report
+		 *contains [0]=report id 0x09 and [1..15]=payload, delivered as two EP0
+		 *DATA packets. Dispatch only after both packets are accumulated.*/
 		if (((control_request.Value & 0xff) == UX_HLINK_FEATURE_REPORT_ID) &&
 			((control_request.Index & 0xff) == USB_INTF_HOST_LINK)) {
-			if (data_request) {
-				u8 _pay[UX_HLINK_REPORT_PAYLOAD_SIZE];
-				int _i;
-				int _len = control_request.Length;
-				if (_len > (UX_HLINK_REPORT_PAYLOAD_SIZE + 1)) { _len = UX_HLINK_REPORT_PAYLOAD_SIZE + 1; }
-				usbhw_reset_ctrl_ep_ptr (); //address
-				for (_i = 0; _i < _len; _i++) {
-					u8 _b = usbhw_read_ctrl_ep_data();
-					if ((UX_HLINK_REPORT_PAYLOAD_SIZE + 1) == _len) {
-						if (_i >= 1 && (_i - 1) < UX_HLINK_REPORT_PAYLOAD_SIZE) { _pay[_i - 1] = _b; } //skip wire report id
+			if (USB_IRQ_SETUP_REQ == data_request) {
+				ux_hlink_feature_rx_received = 0;
+				ux_hlink_feature_rx_remaining = control_request.Length;
+				if (ux_hlink_feature_rx_remaining != (UX_HLINK_FEATURE_REPORT_PAYLOAD_SIZE + 1)) {
+					ux_hlink_feature_rx_remaining = 0;
+					g_stall = 1;
+				}
+				break;
+			}
+
+			if (ux_hlink_feature_rx_remaining) {
+				u8 _chunk_len = ux_hlink_feature_rx_remaining > 8 ? 8 : ux_hlink_feature_rx_remaining;
+				u8 _i;
+				usbhw_reset_ctrl_ep_ptr();
+				for (_i = 0; _i < _chunk_len; _i++) {
+					ux_hlink_feature_rx_buf[ux_hlink_feature_rx_received + _i] = usbhw_read_ctrl_ep_data();
+				}
+				ux_hlink_feature_rx_received += _chunk_len;
+				ux_hlink_feature_rx_remaining -= _chunk_len;
+				if (!ux_hlink_feature_rx_remaining) {
+					if (ux_hlink_feature_rx_buf[0] == UX_HLINK_FEATURE_REPORT_ID) {
+						user_module_host_link_rx(UX_HLINK_FEATURE_REPORT_PAYLOAD_SIZE, ux_hlink_feature_rx_buf + 1);
 					}
-					else if (_i < UX_HLINK_REPORT_PAYLOAD_SIZE) {
-						_pay[_i] = _b;
+					else {
+						g_stall = 1;
 					}
 				}
-				user_module_host_link_rx((_len == (UX_HLINK_REPORT_PAYLOAD_SIZE + 1)) ? UX_HLINK_REPORT_PAYLOAD_SIZE : _len, _pay);
 			}
 			break;
 		}
@@ -964,6 +977,10 @@ void usb_handle_irq(void) {
 	}
 	if (reg_irq_src & FLD_IRQ_USB_RST_EN){		//USB reset
 		usb_mouse_report_proto = 1;
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+		ux_hlink_feature_rx_received = 0;
+		ux_hlink_feature_rx_remaining = 0;
+#endif
 		reg_irq_src3 = BIT(1);					//Clear USB reset flag
 		for (int i=0; i<8; i++) {
 			reg_usb_ep_ctrl(i) = 0;

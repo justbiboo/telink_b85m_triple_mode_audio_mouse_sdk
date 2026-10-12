@@ -4,10 +4,12 @@ namespace BibooUxTool
 {
     /// <summary>
     /// dongle HID 通道连接管理。
-    /// payload 固定 7 字节；下行使用 Feature Report 0x09，上行使用 Input Report 0x08。
+    /// 下行 Feature Report 0x09 与上行 Input Report 0x08 均为 15 字节 payload。
     /// </summary>
     public sealed class DongleLink : IDisposable
     {
+        private const int FeaturePayloadSize = 15;
+        private const int InputPayloadSize = 15;
         private IntPtr _h;
         private readonly object _sync = new object();
 
@@ -50,17 +52,17 @@ namespace BibooUxTool
             }
         }
 
-        /// <summary>发送 7 字节 payload。成功返回 null；失败返回错误描述。</summary>
-        public string Send(byte[] payload7)
+        /// <summary>发送 15 字节 payload。成功返回 null；失败返回错误描述。</summary>
+        public string Send(byte[] payload)
         {
             lock (_sync)
             {
                 if (_h == IntPtr.Zero)
                     return "未连接";
-                if (payload7 == null || payload7.Length != 7)
-                    return "payload 必须为 7 字节";
+                if (payload == null || payload.Length != FeaturePayloadSize)
+                    return "payload 必须为 15 字节";
 
-                int r = BibooHidNative.bh_send(_h, payload7, payload7.Length);
+                int r = BibooHidNative.bh_send(_h, payload, payload.Length);
                 if (r != 0)
                 {
                     string err = BibooHidNative.LastError();
@@ -71,11 +73,11 @@ namespace BibooUxTool
         }
 
         /// <summary>阻塞等待设备主动发送的 Input Report。返回 0 成功 / -1 失败。</summary>
-        public int TryRead(out byte[] payload7, out string err)
+        public int TryRead(out byte[] payload, out string err)
         {
             lock (_sync)
             {
-                payload7 = new byte[7];
+                payload = new byte[InputPayloadSize];
                 err = null;
                 if (_h == IntPtr.Zero)
                 {
@@ -83,7 +85,7 @@ namespace BibooUxTool
                     return -1;
                 }
 
-                int r = BibooHidNative.bh_read(_h, payload7, payload7.Length);
+                int r = BibooHidNative.bh_read(_h, payload, payload.Length);
                 if (r < 0)
                 {
                     err = BibooHidNative.LastError();
@@ -96,11 +98,11 @@ namespace BibooUxTool
         }
 
         /// <summary>最多等待 timeoutMs 毫秒。返回 1=收到，0=超时，-1=失败。</summary>
-        public int TryReadTimeout(int timeoutMs, out byte[] payload7, out string err)
+        public int TryReadTimeout(int timeoutMs, out byte[] payload, out string err)
         {
             lock (_sync)
             {
-                payload7 = new byte[7];
+                payload = new byte[InputPayloadSize];
                 err = null;
                 if (_h == IntPtr.Zero)
                 {
@@ -108,7 +110,7 @@ namespace BibooUxTool
                     return -1;
                 }
 
-                int r = BibooHidNative.bh_read_timeout(_h, payload7, payload7.Length, timeoutMs);
+                int r = BibooHidNative.bh_read_timeout(_h, payload, payload.Length, timeoutMs);
                 if (r == 0)
                     return 0;
                 if (r < 0)

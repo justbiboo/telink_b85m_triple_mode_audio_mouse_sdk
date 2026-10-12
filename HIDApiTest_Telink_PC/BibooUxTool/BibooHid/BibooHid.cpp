@@ -16,7 +16,10 @@
 #define HLINK_USAGE                0x0001
 #define HLINK_FEATURE_REPORT_ID    0x09
 #define HLINK_INPUT_REPORT_ID      0x08
-#define HLINK_REPORT_SIZE          8
+#define HLINK_FEATURE_PAYLOAD_SIZE 15
+#define HLINK_INPUT_PAYLOAD_SIZE   15
+#define HLINK_FEATURE_REPORT_SIZE  (HLINK_FEATURE_PAYLOAD_SIZE + 1)
+#define HLINK_INPUT_REPORT_SIZE    (HLINK_INPUT_PAYLOAD_SIZE + 1)
 
 typedef struct {
 	hid_device* device;
@@ -93,7 +96,7 @@ extern "C" BIBOO_API void bh_close(void* h)
 extern "C" BIBOO_API int bh_send(void* h, const unsigned char* payload, int payload_len)
 {
 	bh_device_t* link = (bh_device_t*)h;
-	unsigned char buf[HLINK_REPORT_SIZE];
+	unsigned char buf[HLINK_FEATURE_REPORT_SIZE];
 	int n;
 	int res;
 
@@ -102,7 +105,7 @@ extern "C" BIBOO_API int bh_send(void* h, const unsigned char* payload, int payl
 
 	memset(buf, 0, sizeof(buf));
 	buf[0] = HLINK_FEATURE_REPORT_ID;
-	n = payload_len > 7 ? 7 : payload_len;
+	n = payload_len > HLINK_FEATURE_PAYLOAD_SIZE ? HLINK_FEATURE_PAYLOAD_SIZE : payload_len;
 	memcpy(&buf[1], payload, n);
 	res = hid_send_feature_report(link->device, buf, sizeof(buf));
 	if (res < 0) {
@@ -115,25 +118,25 @@ extern "C" BIBOO_API int bh_send(void* h, const unsigned char* payload, int payl
 
 static int bh_read_internal(bh_device_t* link, unsigned char* out_payload, int buf_len, int milliseconds)
 {
-	unsigned char rbuf[HLINK_REPORT_SIZE] = {0};
+	unsigned char rbuf[HLINK_INPUT_REPORT_SIZE] = {0};
 	int res;
 
 	if (!link) { set_err("bh_read: not connected"); return -1; }
-	if (!out_payload || buf_len < 7) { set_err("bh_read: buffer < 7 bytes"); return -1; }
+	if (!out_payload || buf_len < HLINK_INPUT_PAYLOAD_SIZE) { set_err("bh_read: buffer < 15 bytes"); return -1; }
 
 	res = milliseconds < 0 ? hid_read(link->device, rbuf, sizeof(rbuf)) :
 		hid_read_timeout(link->device, rbuf, sizeof(rbuf), milliseconds);
 	if (res == 0) {
 		return 0;
 	}
-	if (res != HLINK_REPORT_SIZE || rbuf[0] != HLINK_INPUT_REPORT_ID) {
+	if (res != HLINK_INPUT_REPORT_SIZE || rbuf[0] != HLINK_INPUT_REPORT_ID) {
 		const wchar_t* e = hid_error(link->device);
 		set_err("hid_read ret=%d report=0x%02X (%ls)", res, rbuf[0], e ? e : L"");
 		return -1;
 	}
 
-	memcpy(out_payload, &rbuf[1], 7);
-	return 7;
+	memcpy(out_payload, &rbuf[1], HLINK_INPUT_PAYLOAD_SIZE);
+	return HLINK_INPUT_PAYLOAD_SIZE;
 }
 
 extern "C" BIBOO_API int bh_read(void* h, unsigned char* out_payload, int buf_len)

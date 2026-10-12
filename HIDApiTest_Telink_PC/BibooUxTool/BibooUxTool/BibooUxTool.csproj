@@ -13,6 +13,7 @@
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <Version>0.1.0</Version>
     <Product>Biboo UX Tool</Product>
+    <ApplicationIcon>Resources\ip_hero_pose.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
