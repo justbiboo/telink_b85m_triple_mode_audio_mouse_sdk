@@ -30,6 +30,7 @@
 #include "ux_ft_proto.h"
 #include "drivers.h"						/*clock_time / clock_time_exceed*/
 #include "stack/ble/ble.h"					/*blc_ll_getCurrentState / BLM_CONN_HANDLE / blm_ll_disconnect*/
+#include "vendor/common/app_common.h"		/*cur_conn_device (DUT peer MAC for UX_FT_CMD_DUT_INFO)*/
 #include "../spp/ux_spp.h"					/*ux_spp_send / SPP handles / rx hook registration*/
 #include "../host_link/ux_host_link.h"		/*ux_host_link_tx*/
 #include "../user_data/ux_user_data.h"		/*authorization tick (BIBOO_UX_AUTH)*/
@@ -41,6 +42,32 @@
 
 /*factory-test mode flag (0x10 FT_START / 0x11 FT_STOP)*/
 static u8 ux_ft_active = 0;
+
+/*DUT local name cache: filled by ux_ft_dut_name_update() from the ADV report
+ *of the device we connect to (blm_host.c), dropped on link loss. Reported to
+ *the PC by UX_FT_CMD_DUT_INFO together with the peer MAC (read live from
+ *cur_conn_device at query time).*/
+static u8 ux_dut_name[UX_FT_DUTI_NAME_LEN];
+static u8 ux_dut_name_len = 0;
+
+void ux_ft_dut_name_update(const u8 *name, u8 len)
+{
+	if (len > UX_FT_DUTI_NAME_LEN)
+	{
+		len = UX_FT_DUTI_NAME_LEN;	/*truncated; the PC shows what fits*/
+	}
+	if (len)
+	{
+		memcpy(ux_dut_name, name, len);
+	}
+	ux_dut_name_len = len;
+}
+
+void ux_ft_dut_name_clear(void)
+{
+	ux_dut_name_len = 0;
+	memset(ux_dut_name, 0, sizeof(ux_dut_name));
+}
 
 /*deferred DUT disconnect (0x13): blm_ll_disconnect is a BLE stack call, run
  *from ux_factory_test_proc() instead of the EP0 irq*/
@@ -226,7 +253,7 @@ int ux_ft_host_cmd(const u8 *p, u8 *r)
 	u8 cmd = p[UX_FT_DL_OFFS_CMD];
 	u8 seq = p[UX_FT_DL_OFFS_SEQ];
 
-	if ((cmd >= UX_FT_CMD_START) && (cmd <= UX_FT_CMD_DUT_DISCONNECT))	/*0x10..0x13*/
+	if ((cmd >= UX_FT_CMD_START) && (cmd <= UX_FT_CMD_DUT_MAC))	/*0x10..0x15*/
 	{
 		switch (cmd)
 		{
@@ -269,7 +296,28 @@ int ux_ft_host_cmd(const u8 *p, u8 *r)
 				ux_ft_pend_disconnect = 1;	/*BLE stack call -> ux_factory_test_proc*/
 				ux_ft_rsp_build(r, cmd, seq, UX_FT_ST_OK);
 				break;
-
+			
+			case UX_FT_CMD_DUT_INFO:
+			{
+				u8 i;
+			
+				ux_ft_rsp_build(r, cmd, seq, UX_FT_ST_OK);
+				for (i = 0; i < ux_dut_name_len; i++)
+				{
+					r[UX_FT_UL_OFFS_DATA + UX_FT_DUTI_OFFS_NAME + i] =
+						ux_dut_name[i];
+				}
+				break;
+			}
+			
+			case UX_FT_CMD_DUT_MAC:
+				ux_ft_rsp_build(r, cmd, seq, UX_FT_ST_OK);
+				/*peer MAC: cur_conn_device.mac_addr is filled at connection
+				 *establish time (LSB first); the PC reverses it for display*/
+				memcpy(&r[UX_FT_UL_OFFS_DATA + UX_FT_DUTM_OFFS_MAC],
+					   cur_conn_device.mac_addr, 6);
+				break;
+			
 			default:
 				break;
 		}

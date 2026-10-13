@@ -33,6 +33,7 @@ namespace BibooUxTool
         private GradientButton _btnDutDisc;
         private Label _lblDevStatus;
         private Label _lblFtStatus;
+        private readonly ToolTip _tips = new ToolTip();
 
         // 鼠标报告卡片
         private Label _lblMouse;
@@ -63,6 +64,8 @@ namespace BibooUxTool
         private bool _dutUp;
         private bool _sppReady;
         private int _authTick = -1;
+        private string _dutName = string.Empty;    // DUT 蓝牙名（固件从连接时 ADV 缓存上报）
+        private string _dutMac = string.Empty;     // DUT 对端 MAC（MSB 前显示格式 AA:BB:...）
 
         // 记录与统计（CSV 导出的数据源）
         private int _passCount;
@@ -95,7 +98,7 @@ namespace BibooUxTool
 
         private void BuildUi()
         {
-            Text = "Biboo UX 上位机 - 产线测试";
+            Text = "Biboo OS - 产线测试";
             BackColor = UiTheme.FormBg;
             Font = UiTheme.FontBody;
             ClientSize = new Size(920, 688);
@@ -115,7 +118,7 @@ namespace BibooUxTool
             // 设备卡片
             var cardDevice = new RoundedPanel();
             cardDevice.SetBounds(12, 12, 896, 96);
-            cardDevice.Controls.Add(MakeCardTitle("设备（Host Link：下行 0x09 / 上行 0x08，15B）"));
+            cardDevice.Controls.Add(MakeCardTitle("Host Link"));
 
             _btnConnect = MakeButton("连接", 16, 32, 92, 30, true, OnConnect);
             _btnFtStart = MakeButton("进入产测", 118, 32, 92, 30, true, OnFtStart);
@@ -134,6 +137,12 @@ namespace BibooUxTool
             _lblFtStatus.Font = new Font("Consolas", 9f);
             _lblFtStatus.TextAlign = ContentAlignment.MiddleLeft;
 
+            // 状态行字段说明（悬停提示；DUT 名字/MAC 来自 0x14 DUT_INFO / 0x15 DUT_MAC 查询）
+            _tips.SetToolTip(_lblFtStatus,
+                "FT: 产测模式开关（进入后 BLE 报告镜像为 0xE1 事件，USB 转发不受影响）\r\n" +
+                "DUT: 被测鼠标连接状态；其后为连接时广播的蓝牙名，[ ] 内为对端蓝牙地址（MAC）\r\n" +
+                "SPP: 数据通道就绪状态；auth tick: 授权剩余时间(ms)，10000=待授权，0=已过期");
+
             cardDevice.Controls.AddRange(new Control[]
             {
                 _btnConnect, _btnFtStart, _btnFtStop, _btnRefresh, _btnDutDisc,
@@ -143,7 +152,7 @@ namespace BibooUxTool
             // 鼠标报告卡片
             var cardMouse = new RoundedPanel();
             cardMouse.SetBounds(12, 116, 896, 196);
-            cardMouse.Controls.Add(MakeCardTitle("鼠标报告（0xE1；进入产测后 BLE 报告旁路为事件）"));
+            cardMouse.Controls.Add(MakeCardTitle("鼠标报告"));
 
             _lblMouse = new Label();
             _lblMouse.SetBounds(16, 34, 500, 22);
@@ -331,6 +340,8 @@ namespace BibooUxTool
                 _dutUp = false;
                 _sppReady = false;
                 _authTick = -1;
+                _dutName = string.Empty;
+                _dutMac = string.Empty;
                 SetLed(_ledL, false);
                 SetLed(_ledM, false);
                 SetLed(_ledR, false);
@@ -342,10 +353,17 @@ namespace BibooUxTool
 
         private void UpdateFtStatus()
         {
+            string dutTxt = _dutUp ? "UP" : "DOWN";
+            if (_dutUp && !string.IsNullOrEmpty(_dutMac))
+            {
+                dutTxt += !string.IsNullOrEmpty(_dutName)
+                    ? "  " + _dutName + "  [" + _dutMac + "]"
+                    : "  [" + _dutMac + "]";
+            }
             _lblFtStatus.Text = string.Format(
                 "FT: {0}   DUT: {1}   SPP: {2}   auth tick: {3}",
                 _ftActive ? "ON" : "OFF",
-                _dutUp ? "UP" : "DOWN",
+                dutTxt,
                 _sppReady ? "READY" : "N/A",
                 _authTick >= 0 ? _authTick.ToString() : "N/A");
 
@@ -353,6 +371,8 @@ namespace BibooUxTool
             _btnFtStart.Enabled = connected && !_ftActive;
             _btnFtStop.Enabled = connected && _ftActive;
             _btnRefresh.Enabled = connected;
+            /*主按钮样式：DUT 连上 = 蓝紫可点击，断开 = 灰（Enabled=false 的 IsPrimary 渲染）*/
+            _btnDutDisc.IsPrimary = true;
             _btnDutDisc.Enabled = connected && _dutUp;
             _btnAuthRun.Enabled = connected && _ftActive;
         }
@@ -385,6 +405,7 @@ namespace BibooUxTool
                 _timer.Start();
                 LogLine("已连接: " + _link.GetOpenedPath(), UiTheme.Success);
                 SendStatusQuery();
+                SendDutInfoQuery();
             }
             catch (DllNotFoundException)
             {
@@ -480,8 +501,18 @@ namespace BibooUxTool
                 if (_dutUp != up)
                 {
                     _dutUp = up;
+                    if (up)
+                    {
+                        SendDutInfoQuery();     // 拉取 DUT 蓝牙名 + MAC
+                        LogLine("DUT 已连接。", UiTheme.Success);
+                    }
+                    else
+                    {
+                        _dutName = string.Empty;
+                        _dutMac = string.Empty;
+                        LogLine("DUT 已断开。", UiTheme.Danger);
+                    }
                     UpdateFtStatus();
-                    LogLine(up ? "DUT 已连接。" : "DUT 已断开。", up ? UiTheme.Success : UiTheme.Danger);
                 }
                 return;
             }
@@ -517,6 +548,54 @@ namespace BibooUxTool
             _authTick = rsp[UxFtProto.UlOffsData + UxFtProto.StsOffsTickL] |
                         (rsp[UxFtProto.UlOffsData + UxFtProto.StsOffsTickH] << 8);
             UpdateFtStatus();
+            if (_dutUp && string.IsNullOrEmpty(_dutMac))
+                SendDutInfoQuery();     // DUT 已连但信息未拉取（如 E2 事件先于工具连接到达）
+        }
+
+        /// <summary>
+        /// 查询 DUT 蓝牙名（0x14 DUT_INFO，12B）+ 对端 MAC（0x15 DUT_MAC，6B）。
+        /// 仅在 DUT 已连接时调用；失败静默（DUT 断开时随后的 0xE2 事件 / STATUS 会刷新显示），不刷错误日志。
+        /// </summary>
+        private void SendDutInfoQuery()
+        {
+            if (!_link.IsConnected || !_dutUp)
+                return;
+
+            byte[] rsp;
+            string err;
+
+            // 名字：0x14，响应 data 区 12B 全给本地名（MAC 一帧放不下，单独走 0x15）
+            int r = _link.SendCommand(UxFtProto.CmdDutInfo, null, DongleLink.CommandTimeoutMs, out rsp, out err);
+            if (r > 0 && rsp[UxFtProto.UlOffsStatus] == UxFtProto.StOk)
+            {
+                int n = UxFtProto.DutInfoNameLen;
+                while (n > 0 && rsp[UxFtProto.UlOffsData + UxFtProto.DutInfoOffsName + n - 1] == 0)
+                    n--;        // 名字零填充，去掉尾部 0
+                _dutName = (n > 0)
+                    ? Encoding.ASCII.GetString(rsp, UxFtProto.UlOffsData + UxFtProto.DutInfoOffsName, n)
+                    : string.Empty;
+            }
+
+            // MAC：0x15，6B，固件序 LSB 在前 → 显示倒序
+            r = _link.SendCommand(UxFtProto.CmdDutMac, null, DongleLink.CommandTimeoutMs, out rsp, out err);
+            if (r > 0 && rsp[UxFtProto.UlOffsStatus] == UxFtProto.StOk)
+            {
+                var mac = new byte[6];
+                Array.Copy(rsp, UxFtProto.UlOffsData + UxFtProto.DutMacOffsMac, mac, 0, 6);
+                _dutMac = FormatMac(mac);
+            }
+
+            if (r > 0)
+                UpdateFtStatus();
+        }
+
+        /// <summary>固件上报的 MAC 为 LSB 在前（控制器原序），转为惯例的 MSB 前 "AA:BB:CC:DD:EE:FF"。</summary>
+        private static string FormatMac(byte[] mac)
+        {
+            var sb = new StringBuilder(17);
+            for (int i = 5; i >= 0; i--)
+                sb.Append(mac[i].ToString("X2")).Append(i == 0 ? string.Empty : ":");
+            return sb.ToString();
         }
 
         private void OnFtStart(object sender, EventArgs e)
@@ -534,8 +613,9 @@ namespace BibooUxTool
             {
                 _ftActive = true;
                 UpdateFtStatus();
-                LogLine("已进入产测模式（FT ON，鼠标报告旁路为 0xE1）。", UiTheme.Success);
+                LogLine("已进入产测模式（FT ON，鼠标报告镜像为 0xE1，USB 转发不受影响）。", UiTheme.Success);
                 SendStatusQuery();
+                SendDutInfoQuery();
             }
             else
             {

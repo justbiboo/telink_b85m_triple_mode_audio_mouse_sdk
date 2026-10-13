@@ -53,7 +53,7 @@ namespace BibooUxTool
 
         private void BuildUi()
         {
-            Text = "Biboo UX 上位机 - Dongle 收发调试";
+            Text = "Biboo OS - Dongle 收发调试";
             BackColor = UiTheme.FormBg;
             Font = UiTheme.FontBody;
             ClientSize = new Size(780, 600);

@@ -65,6 +65,8 @@
 #define UX_FT_CMD_STOP              0x11    /*leave factory-test mode (the USB forwarding always runs, no bypass)*/
 #define UX_FT_CMD_STATUS            0x12    /*query: active / DUT link / SPP ready / auth tick*/
 #define UX_FT_CMD_DUT_DISCONNECT    0x13    /*drop the current DUT mouse (swap unit on the line)*/
+#define UX_FT_CMD_DUT_INFO          0x14    /*query: DUT local name (cached from the connect-time ADV report), 12B*/
+#define UX_FT_CMD_DUT_MAC           0x15    /*query: DUT peer MAC (6B, live from cur_conn_device)*/
 #define UX_FT_CMD_FWD               0x40    /*one fragment of a DUT command, forwarded over SPP 0x33F3*/
 
 /* UX_FT_CMD_STATUS response data ([3..14] of the response) */
@@ -91,6 +93,19 @@
 #define UX_FT_LINK_OFFS_STATE       0
 #define UX_FT_LINK_DOWN             0
 #define UX_FT_LINK_UP               1
+
+/* UX_FT_CMD_DUT_INFO response data ([3..14] of the response, 12B):
+ * local name cached from the connect-time ADV report (AD type 0x09/0x08),
+ * zero padded / truncated to UX_FT_DUTI_NAME_LEN. The peer MAC does NOT
+ * fit into the same frame (6+18 > 12), so it has its own command:
+ * UX_FT_CMD_DUT_MAC. */
+#define UX_FT_DUTI_OFFS_NAME        0
+#define UX_FT_DUTI_NAME_LEN         12
+
+/* UX_FT_CMD_DUT_MAC response data ([3..8] of the response):
+ * peer MAC, LSB first (exactly as the controller reports it); the PC
+ * reverses the bytes for the usual MSB-first display */
+#define UX_FT_DUTM_OFFS_MAC         0
 
 /* FT_FWD / EVT_FWD_RSP fragmentation (payload starts at the frame's
  * args/data offset, i.e. downlink [2] / event [2]):

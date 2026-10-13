@@ -31,10 +31,12 @@ namespace BibooUxTool
         public const byte StBusy = 2;        // 上一条产测命令仍在途
 
         // 下行命令（[0]）
-        public const byte CmdStart = 0x10;           // 进入产测模式（鼠标报告旁路 → 0xE1）
-        public const byte CmdStop = 0x11;            // 退出产测模式，恢复 USB 转发
+        public const byte CmdStart = 0x10;           // 进入产测模式（鼠标报告镜像 → 0xE1）
+        public const byte CmdStop = 0x11;            // 退出产测模式（USB 转发不受影响）
         public const byte CmdStatus = 0x12;          // 查询 active / DUT / SPP / tick
         public const byte CmdDutDisconnect = 0x13;   // 断开当前 DUT（产线换机）
+        public const byte CmdDutInfo = 0x14;         // 查询 DUT 本地名（连接时 ADV 缓存），12B
+        public const byte CmdDutMac = 0x15;          // 查询 DUT 对端 MAC，6B
         public const byte CmdFwd = 0x40;             // DUT 命令分片，经 SPP 0x33F3 转发
 
         // STATUS 响应数据（相对 UlOffsData）
@@ -43,6 +45,14 @@ namespace BibooUxTool
         public const int StsOffsSppReady = 2;  // 1 = 0x33F3/0x33F4 已发现
         public const int StsOffsTickL = 3;     // 授权 tick（u16 小端）
         public const int StsOffsTickH = 4;
+
+        // DUT_INFO 响应数据（相对 UlOffsData，镜像 ux_ft_proto.h）：本地名单独占 12B，
+        // MAC 单独走 CmdDutMac（一帧 12B data 放不下 MAC 6B + 名字 18B）
+        public const int DutInfoOffsName = 0;        // ≤12B 本地名（ADV 0x09/0x08 缓存，零填充/截断）
+        public const int DutInfoNameLen = 12;
+
+        // DUT_MAC 响应数据（相对 UlOffsData）
+        public const int DutMacOffsMac = 0;          // 6B 对端 MAC（固件内存序 LSB 在前，显示时倒序）
 
         // 上行事件（[0]）
         public const byte EvtMouse = 0xE1;     // 旁路的 BLE 鼠标报告

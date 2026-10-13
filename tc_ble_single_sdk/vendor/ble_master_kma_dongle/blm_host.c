@@ -36,6 +36,7 @@
 #include "vendor/user/spp/ux_spp.h"			/*BIBOO UX: SPP data channel API/handles (BIBOO_UX_SPP, see vendor/user/spp)*/
 #include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module hooks (mouse_fwd, voice_dec)*/
 #include "vendor/user/led/ux_led.h"			/*BIBOO UX: five-color LED engine (BIBOO_UX_LED, see vendor/user/led)*/
+#include "vendor/user/factory_test/ux_factory_test.h"	/*BIBOO UX: DUT name cache for the factory-test DUT_INFO report (BIBOO_UX_FACTORY_TEST)*/
 
 
 extern u8 read_by_type_req_uuidLen;
@@ -263,6 +264,32 @@ int blm_le_adv_report_event_handle(u8 *p)
 
 	if(master_auto_connect || user_manual_pairing)
 	{
+		#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST && BIBOO_UX_HOST_LINK)
+		/*BIBOO UX: cache the DUT local name (AD type 0x09 complete / 0x08 shortened)
+		 *for the factory-test DUT_INFO (0x14) report to the PC; parsed only from
+		 *the ADV of a device we are about to connect, so unrelated BLE devices
+		 *never pollute the cache (vendor/user/factory_test).*/
+		{
+			u8 ad_off = 0;
+			while (ad_off < pa->len)
+			{
+				u8 ad_len  = pa->data[ad_off];
+				u8 ad_type;
+				if ((ad_len == 0) || ((ad_off + ad_len) >= pa->len))
+				{
+					break;	/*malformed / runs past the data field (rssi sits at data[len])*/
+				}
+				ad_type = pa->data[ad_off + 1];
+				if ((ad_type == 0x09) || (ad_type == 0x08))
+				{
+					ux_ft_dut_name_update(&pa->data[ad_off + 2], ad_len - 1);
+					break;
+				}
+				ad_off += (ad_len + 1);
+			}
+		}
+		#endif
+
 		//send create connection cmd to controller, trigger it switch to initiating state, after this cmd,
 		//controller will scan all the ADV packets it received but not report to host, to find the specified
 		//device(adr_type & mac), then send a connection request packet after 150us, enter to connection state
@@ -433,6 +460,10 @@ int 	blm_disconnect_event_handle(u8 *p)
 
 
 	cur_conn_device.conn_handle = 0;  //when disconnect, clear conn handle
+
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST && BIBOO_UX_HOST_LINK)
+	ux_ft_dut_name_clear();	/*BIBOO UX: DUT gone -> drop the cached local name (DUT_INFO)*/
+	#endif
 
 
 	//if previous connection SMP & SDP not finished, clear flag

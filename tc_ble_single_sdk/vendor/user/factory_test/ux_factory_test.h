@@ -35,6 +35,15 @@ int  ux_ft_host_cmd(const u8 *p, u8 *r);
  * host_link module also uses this to drive the 0xE1 mouse-report bypass
  * (ux_host_link_att_mouse, top-level att_mouse hook like the LED consumer) */
 u8   ux_ft_host_active(void);
+
+/* DUT info hooks (called from blm_host.c):
+ * ux_ft_dut_name_update - cache the DUT local name parsed from the ADV
+ *   report of the device we are about to connect (AD type 0x09/0x08);
+ * ux_ft_dut_name_clear  - drop the cached name on link loss.
+ * The DUT peer MAC is not cached here: UX_FT_CMD_DUT_INFO reads it live
+ * from cur_conn_device (vendor/common/app_common.h) when responding. */
+void ux_ft_dut_name_update(const u8 *name, u8 len);
+void ux_ft_dut_name_clear(void);
 #endif /* BIBOO_UX_HOST_LINK */
 
 #endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST */
