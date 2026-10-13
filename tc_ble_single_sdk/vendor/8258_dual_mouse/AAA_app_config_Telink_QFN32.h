@@ -18,10 +18,10 @@
     #define DEVICE_NAME_INCLUDE_MAC_DEBUG 0 //for debug
     #define MUTI_DEVICE_SWITCH_DEBUG     1//for debug
 
-    #define ADC_BATT_DEBUG   0  //enbale : in ble mode £¬notify adc value.
+    #define ADC_BATT_DEBUG   0  //enbale : in ble mode ï¿½ï¿½notify adc value.
 
     // test  mcu current ,in the mode,sensor shut down ,
-    // when both left and right  button are pressed £¬mouse auto draw a square in conencted
+    // when both left and right  button are pressed ï¿½ï¿½mouse auto draw a square in conencted
     #define TEST_MCU_CURRENT_DEBUG       0
 
     #define SHOW_MAST_REAL_MAC_DEBUG    0//for test get master real addr
@@ -61,12 +61,12 @@
 
     #define MOUSE_PIPE1_DATA_WITH_DID	1//If you want to fit the old hamster dongle (firmware version :v5.3) it must set 0
 
-    #define MOUSE_DATA_LEN_AAA	6   //If you want to fit the old hamster dongle (firmware version :v5.3)  it must set 4
+    #define MOUSE_DATA_LEN_AAA	4   //BIBOO UX: must match the dongle end (ble_master_kma_dongle = 4: btn+s8x+s8y+wheel); the old hamster dongle (v5.3) also uses 4
 
     //#define OTA_ENABLE_AAA     1
     #define BLE_OTA_SERVER_ENABLE  1
 
-    #define EMI_TEST_FUN_ENABLE_AAA   ((!ADAPT_ALL_HW_AUTO_DRAW_IN_D24G_MODE_DEBUG)&&1)//If the flash  is 128k, must be set 0£¬save 2k
+    #define EMI_TEST_FUN_ENABLE_AAA   ((!ADAPT_ALL_HW_AUTO_DRAW_IN_D24G_MODE_DEBUG)&&1)//If the flash  is 128k, must be set 0ï¿½ï¿½save 2k
 
     #define BATT_CHECK_ENABLE     ((!ADAPT_ALL_HW_AUTO_DRAW_IN_D24G_MODE_DEBUG)&&1)
 

@@ -10,6 +10,9 @@
  *******************************************************************************************************/
 #include "tl_common.h"
 #include "stack/ble/ble.h"	/*blc_gatt_pushWriteCommand / blc_ll_getCurrentState / BLM_CONN_HANDLE*/
+#include "vendor/common/tlkapi_debug.h"				/* tlkapi_printf */
+#include "vendor/common/simple_sdp.h"				/* central_sdp_pending */
+#include "../../ble_master_kma_dongle/blm_host.h"	/* central_smp_pending */
 
 #include "ux_spp.h"
 
@@ -188,9 +191,65 @@ void ux_spp_init(void)
 	ux_spp_user_rce_handler = NULL;	/*factory auth logic (0x77/0x78) is built in*/
 }
 
+/*main loop (dispatched from user_module_proc): enable the DUT factory SPP
+ *notify (0x33F4) by writing its CCC (0x2902) after SMP & SDP done.
+ *DUT side bls_att_pushNotifyData checks the CCC value: without this write
+ *every DUT reply (0x77/0x78 auth rsp, PING/AES/TOUCH ack, 0x22 touch
+ *stream) is silently dropped and the bridged PC command times out.
+ *One shot per connection (reset on link loss).*/
 void ux_spp_proc(void)
 {
-	/*reserved: SPP rx housekeeping for the production-test module (Task 6)*/
+	static u8 ccc_done = 0;
+	#if (BIBOO_UX_DEBUG)
+	static u8 wait_printed = 0;	/*one-shot: why the CCC write is not issued yet*/
+	#endif
+
+	if (blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
+	{
+		ccc_done = 0;	/*reset for next connection*/
+		#if (BIBOO_UX_DEBUG)
+		wait_printed = 0;
+		#endif
+		return;
+	}
+	if (central_sdp_pending)	/*SDP still ongoing*/
+	{
+		return;
+	}
+	#if (BLE_HOST_SMP_ENABLE)
+	if (central_smp_pending)	/*SMP pairing still ongoing*/
+	{
+		return;
+	}
+	#endif
+
+	if (ccc_done)
+	{
+		return;
+	}
+	if (!spp_my_read_handler)
+	{
+		#if (BIBOO_UX_DEBUG)
+		if (!wait_printed)
+		{
+			wait_printed = 1;	/*diagnose once per connection: SDP found no 0x33F4*/
+			tlkapi_printf(APP_LOG_EN, "[DBG] SPP CCC wait: rdH=%x wrH=%x (sdp=%x smp=%x)\n",
+				spp_my_read_handler, spp_my_write_handler,
+				central_sdp_pending, central_smp_pending);
+		}
+		#endif
+		return;	/*notify handle not resolved yet (SDP failed or not started)*/
+	}
+
+	/*CCC handle = notify value handle + 1 (ATT row order: prop, value, CCC)*/
+	u8 ccc[2] = {0x01, 0x00};
+	if (!blc_gatt_pushWriteCommand(BLM_CONN_HANDLE, spp_my_read_handler + 1, ccc, 2))
+	{
+		ccc_done = 1;
+		#if (BIBOO_UX_DEBUG)
+		tlkapi_printf(APP_LOG_EN, "[DBG] SPP notify CCC enabled (H=%x)\n", spp_my_read_handler);
+		#endif
+	}
 }
 
 #endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_SPP */

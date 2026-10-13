@@ -55,6 +55,9 @@ static volatile u8 ux_ft_dut_ready = 0;	/*1 = complete frame waiting for the SPP
 /*DUT reply tracking for the frame just sent (0x33F4 notify)*/
 static u8  ux_ft_rsp_pending = 0;
 static u8  ux_ft_rsp_retried = 0;
+static u8  ux_ft_rsp_len = 0;	/*snapshot of ux_ft_dut_len at send time: the
+							 *assembly counter is reset right after send, the
+							 *retransmit below must not rely on it*/
 static u32 ux_ft_rsp_tick = 0;
 
 /*last DUT link state (0xE2 edge detection)*/
@@ -289,37 +292,10 @@ u8 ux_ft_host_active(void)
 
 
 /*----------------------------------------------------------------------------
- * mouse report bypass hook (ux_mouse_fwd.c -> user_module_factory_test_bypass)
- *--------------------------------------------------------------------------*/
-int ux_ft_mouse_bypass(u8 *p)
-{
-#if (BIBOO_UX_HOST_LINK)
-	if (ux_ft_active)
-	{
-		u8 rpt[UX_FT_HLINK_SIZE];
-		u8 i;
-		/*raw BLE report bytes (btn first; MOUSE_DATA_LEN_AAA layout, the PC
-		 *interprets them according to the PING-reported mouse length)*/
-		u8 n = MOUSE_DATA_LEN_AAA;
-
-		memset(rpt, 0, sizeof(rpt));
-		rpt[UX_FT_EVT_OFFS_ID]  = UX_FT_EVT_MOUSE;
-		rpt[UX_FT_EVT_OFFS_SEQ] = ux_ft_evt_seq++;
-		for (i = 0; (i < n) && ((UX_FT_EVT_OFFS_DATA + i) < UX_FT_HLINK_SIZE); i++)
-		{
-			rpt[UX_FT_EVT_OFFS_DATA + i] = p[i];
-		}
-		ux_host_link_tx(UX_FT_HLINK_SIZE, rpt);
-
-		return 1;	/*consumed: skip the USB forwarding*/
-	}
-#endif
-	return 0;
-}
-
-
-/*----------------------------------------------------------------------------
  * module entry (dispatched by user_module_manage.c)
+ * NOTE: the 0xE1 mouse-report bypass moved into the host_link module
+ * (ux_host_link_att_mouse, top-level att_mouse hook like the LED consumer);
+ * this module keeps the FT commands, the E2 link event and the E3 SPP bridge.
  *--------------------------------------------------------------------------*/
 void ux_factory_test_init(void)
 {
@@ -362,6 +338,7 @@ void ux_factory_test_proc(void)
 		{
 			ux_ft_rsp_pending = 1;	/*await the DUT reply (see the retry below)*/
 			ux_ft_rsp_retried = 0;
+			ux_ft_rsp_len = ux_ft_dut_len;	/*snapshot before the assembly counter reset*/
 			ux_ft_rsp_tick = clock_time();
 			#if (BIBOO_UX_DEBUG)
 			printf("[ux_ft] DUT cmd %02X sent, len %d\r\n", ux_ft_dut_buf[0], ux_ft_dut_len);
@@ -369,6 +346,9 @@ void ux_factory_test_proc(void)
 		}
 	#endif
 		ux_ft_dut_ready = 0;
+		ux_ft_dut_len = 0;	/*reset after send: the next command's first fragment
+							checks (ux_ft_dut_len + len) <= UX_FT_SPP_SIZE, a stale
+							non-zero value makes it trip ST_ERR on the 2nd+ command*/
 	}
 
 #if (BIBOO_UX_SPP)
@@ -385,7 +365,8 @@ void ux_factory_test_proc(void)
 			{
 				ux_ft_rsp_retried = 1;
 				ux_ft_rsp_tick = clock_time();
-				ux_spp_send(ux_ft_dut_buf, ux_ft_dut_len);
+				ux_spp_send(ux_ft_dut_buf, ux_ft_rsp_len);	/*snapshot len: the
+					assembly counter was already reset after the first send*/
 				printf("[ux_ft] no DUT reply, retransmit once\r\n");
 			}
 			else

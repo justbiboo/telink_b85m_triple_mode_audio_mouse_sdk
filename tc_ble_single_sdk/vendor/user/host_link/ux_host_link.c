@@ -20,6 +20,7 @@
 #include "drivers.h"
 #include "stack/ble/controller/ble_controller.h"	/* blc_ll_getCurrentState, BLS_LINK_STATE_CONN (mouse link up test); NOTE: ll.h alone is not self-contained - blt_event_callback_t comes from controller.h, use the ble_controller.h umbrella */
 #include "vendor/user/factory_test/ux_factory_test.h"	/*BIBOO UX: factory-test commands 0x10..0x13/0x40 (BIBOO_UX_FACTORY_TEST)*/
+#include "vendor/user/factory_test/ux_ft_proto.h"	/*BIBOO UX: FT host link protocol constants (0xE1 evt, frame offsets)*/
 
 
 /*----------------------------------------------------------------------------
@@ -78,6 +79,9 @@ static u8 ux_hlink_tx_fifo[UX_HLINK_TX_FIFO_NUM][UX_HLINK_INPUT_PAYLOAD];
 static volatile u8 ux_hlink_tx_wptr = 0;
 static volatile u8 ux_hlink_tx_rptr = 0;
 static volatile u8 ux_hlink_rx_seq = 0;
+/*rolling sequence of the 0xE1 factory-test mouse events (ux_host_link_att_mouse);
+ *independent from the E2/E3 event sequence in the factory_test module*/
+static u8 ux_hlink_evt_seq = 0;
 
 #if (BIBOO_UX_DEBUG)
 volatile u32 dbg_hrx_cnt = 0;
@@ -196,7 +200,7 @@ void ux_host_link_rx(u8 len, u8 *p)
  * Input Report every second. The host receives the frame through its
  * pending Interrupt IN read.
  * Set UX_HLINK_TEST_BEACON to 0 to mute it.--------------------------------*/
-#define UX_HLINK_TEST_BEACON   1     /*test: 1s uplink beacon while the mouse link is up*/
+#define UX_HLINK_TEST_BEACON   0     /*test: 1s uplink beacon while the mouse link is up*/
 #define UX_HLINK_BEACON_MS     1000  /*beacon period, ms*/
 
 #if (UX_HLINK_TEST_BEACON)
@@ -318,6 +322,46 @@ void ux_host_link_tx(u8 len, u8 *p)
 	#if (UART_PRINT_DEBUG_ENABLE && BIBOO_UX_DEBUG)
 	ux_hlink_dump("[HLINK] TX: ", report, UX_HLINK_INPUT_PAYLOAD);
 	#endif
+}
+
+
+/*----------------------------------------------------------------------------
+ * mouse report mirror hook (att_mouse top level, dispatched through
+ * user_module_att_mouse_hlink, user_module_manage.c).
+ * Same hook style as the LED consumer (user_module_att_mouse_led): att_mouse()
+ * calls this unconditionally and the module itself decides what to do with
+ * the report.
+ * Factory-test mode active: wrap the raw BLE report into a 0xE1 host link
+ * event for the PC and return 1. Normal mode (or BIBOO_UX_FACTORY_TEST
+ * off): return 0. Pure mirror - att_mouse() always continues into the USB
+ * forwarding, so the PC mouse keeps working during factory test.
+ *--------------------------------------------------------------------------*/
+int ux_host_link_att_mouse(u8 *p)
+{
+#if (BIBOO_UX_FACTORY_TEST)
+	if (ux_ft_host_active())
+	{
+		u8 rpt[UX_FT_HLINK_SIZE];
+		u8 i;
+		/*raw BLE report bytes (btn first; MOUSE_DATA_LEN_AAA layout, the PC
+		 *interprets them according to the PING-reported mouse length)*/
+		u8 n = MOUSE_DATA_LEN_AAA;
+
+		memset(rpt, 0, sizeof(rpt));
+		rpt[UX_FT_EVT_OFFS_ID]  = UX_FT_EVT_MOUSE;
+		rpt[UX_FT_EVT_OFFS_SEQ] = ux_hlink_evt_seq++;
+		for (i = 0; (i < n) && ((UX_FT_EVT_OFFS_DATA + i) < UX_FT_HLINK_SIZE); i++)
+		{
+			rpt[UX_FT_EVT_OFFS_DATA + i] = p[i];
+		}
+		ux_host_link_tx(UX_FT_HLINK_SIZE, rpt);
+
+		return 1;	/*mirrored to the PC as a 0xE1 event*/
+	}
+#else
+	(void)p;
+#endif
+	return 0;
 }
 
 

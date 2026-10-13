@@ -41,7 +41,12 @@ main_service_t	main_service = 0;
 sdp_get_handle_callback_t  sdp_get_handle_cb = NULL;
 
 
-#define				ATT_DB_UUID16_NUM		20
+/*BIBOO UX: 20 -> 32. The 8258_dual_mouse factory table already has exactly 20
+ *uuid16 characteristics (gap 3 / devinfo 1 / battery 1 / HID 12 / 0xB03E 1 /
+ *factory SPP 2); host_att_discoveryService silently DROPS entries beyond this
+ *limit, which would break HID-report / SPP handle resolution the moment one
+ *more uuid16 characteristic is added on the DUT side. 8-byte per entry.*/
+#define				ATT_DB_UUID16_NUM		32
 #define				ATT_DB_UUID128_NUM		8
 
 int	central_sdp_pending = 0;			// SDP: service discovery

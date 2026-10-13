@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace BibooUxTool
 {
     /// <summary>
-    /// dongle 产测页（Task 12）：连接管理 / 产测模式开关 / 鼠标报告 LED / 触摸滑条 /
+    /// dongle 产测页（Task 12）：连接管理 / 产测模式开关 / 鼠标报告 LED /
     /// 鉴权+AES 往返 / 记录与导出。
     /// 读通道约定：本页自持 DongleLink 实例，以 50ms UI 定时器 Pump 排空上行帧；
     /// 按钮操作在 UI 线程内阻塞等待（SendCommand / SendSppFrameWait 内部也走 Pump），
@@ -18,7 +18,6 @@ namespace BibooUxTool
     /// </summary>
     public sealed class FactoryTestForm : Form
     {
-        private const int TouchPosMax = 1008;   // 触摸位置量程（DUT 上报 pos 的满量程）
         private const int SppTimeoutMs = 3000;  // SPP 命令响应等待（含分片桥接往返）
 
         private static readonly Color LedOffColor = Color.FromArgb(0xE3, 0xE9, 0xF5);
@@ -41,16 +40,12 @@ namespace BibooUxTool
         private Panel _ledL;
         private Panel _ledM;
         private Panel _ledR;
+        private MouseTrackView _viewXY;      // XY 位移轨迹视图（自绘）
+        private WheelBarView _viewWheel;     // 滚轮瞬时量竖条（自绘）
+        private Label _lblWheelVal;          // 滚轮累计数值（大字）
+        private int _wheelTotal;             // 滚轮累计（代数和，清记录时复位）
+        private bool _clrComboLatch;         // L+R 组合键清空锁存（防按住期间每帧重复触发）
         private long _mouseCount;
-
-        // 触摸卡片
-        private GradientButton _btnTouchStart;
-        private GradientButton _btnTouchStop;
-        private RoundedPanel _trackBg;
-        private RoundedPanel _thumb;
-        private Label _lblTouchState;
-        private Label _lblTouchInfo;
-        private long _touchCount;
 
         // 鉴权卡片
         private GradientButton _btnAuthRun;
@@ -103,7 +98,7 @@ namespace BibooUxTool
             Text = "Biboo UX 上位机 - 产线测试";
             BackColor = UiTheme.FormBg;
             Font = UiTheme.FontBody;
-            ClientSize = new Size(920, 700);
+            ClientSize = new Size(920, 688);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterParent;
@@ -147,78 +142,62 @@ namespace BibooUxTool
 
             // 鼠标报告卡片
             var cardMouse = new RoundedPanel();
-            cardMouse.SetBounds(12, 116, 896, 104);
+            cardMouse.SetBounds(12, 116, 896, 196);
             cardMouse.Controls.Add(MakeCardTitle("鼠标报告（0xE1；进入产测后 BLE 报告旁路为事件）"));
 
             _lblMouse = new Label();
-            _lblMouse.SetBounds(16, 36, 520, 22);
+            _lblMouse.SetBounds(16, 34, 500, 22);
             _lblMouse.Font = new Font("Consolas", 9.5f);
             _lblMouse.Text = "btn=--   x=--   y=--   wheel=--";
             _lblMouse.TextAlign = ContentAlignment.MiddleLeft;
 
-            _ledL = MakeLed("L", 560, 36);
-            _ledM = MakeLed("M", 612, 36);
-            _ledR = MakeLed("R", 664, 36);
-
             _lblMouseCnt = new Label();
-            _lblMouseCnt.SetBounds(724, 38, 150, 20);
+            _lblMouseCnt.SetBounds(524, 36, 120, 20);
             _lblMouseCnt.Text = "累计 0";
             _lblMouseCnt.ForeColor = UiTheme.TextSub;
             _lblMouseCnt.TextAlign = ContentAlignment.MiddleLeft;
 
+            // 按键按钮：绿色 = 按下（L=bit0 / M=bit2 / R=bit1）
+            _ledL = MakeLed("L", 656, 30, 64, 30);
+            _ledM = MakeLed("M", 728, 30, 64, 30);
+            _ledR = MakeLed("R", 800, 30, 64, 30);
+
+            // XY 位移轨迹视图（左）：虚拟游标按上报的相对位移累积，绘制轨迹折线
+            _viewXY = new MouseTrackView();
+            _viewXY.SetBounds(16, 62, 236, 120);
+
+            // 滚轮方向方块（中）：上滑点亮上块（▲ 主色）、下滑点亮下块（▼ 橙色），约 150ms 自动熄灭
+            _viewWheel = new WheelBarView();
+            _viewWheel.SetBounds(264, 62, 36, 120);
+
+            // 滚轮累计数值（方块右侧大字）
+            _lblWheelVal = new Label();
+            _lblWheelVal.SetBounds(308, 62, 60, 120);
+            _lblWheelVal.Font = new Font("Consolas", 16f, FontStyle.Bold);
+            _lblWheelVal.Text = "0";
+            _lblWheelVal.TextAlign = ContentAlignment.MiddleCenter;
+            _lblWheelVal.ForeColor = UiTheme.TextSub;
+
             var lblMouseHint = new Label();
-            lblMouseHint.SetBounds(16, 70, 864, 22);
-            lblMouseHint.Text = "按键位映射：L=bit0 / M=bit2 / R=bit1；仅在产测模式下上报。";
+            lblMouseHint.SetBounds(384, 62, 480, 120);
+            lblMouseHint.Text = "按键映射：L=bit0 / M=bit2 / R=bit1（绿色 = 按下）\r\n"
+                + "XY 视图：随上报位移绘制轨迹，碰边自动钳制\r\n"
+                + "滚轮：上滑点亮上方块、下滑点亮下方块；左侧大数字为累计代数和\r\n"
+                + "组合键：左键+右键同时按下 = 清空所有记录";
             lblMouseHint.ForeColor = UiTheme.TextSub;
             lblMouseHint.TextAlign = ContentAlignment.MiddleLeft;
 
             cardMouse.Controls.AddRange(new Control[]
             {
-                _lblMouse, _ledL, _ledM, _ledR, _lblMouseCnt, lblMouseHint
+                _lblMouse, _ledL, _ledM, _ledR, _lblMouseCnt,
+                _viewXY, _viewWheel, _lblWheelVal, lblMouseHint
             });
 
-            // 触摸卡片
-            var cardTouch = new RoundedPanel();
-            cardTouch.SetBounds(12, 228, 896, 104);
-            cardTouch.Controls.Add(MakeCardTitle("触摸滑条（0x22 触摸流：DUT → dongle → PC）"));
-
-            _btnTouchStart = MakeButton("开始触摸流", 16, 34, 96, 28, true, OnTouchStart);
-            _btnTouchStop = MakeButton("停止触摸流", 120, 34, 96, 28, false, OnTouchStop);
-
-            _trackBg = new RoundedPanel();
-            _trackBg.SetBounds(232, 42, 480, 12);
-            _trackBg.Radius = 6;
-            _trackBg.BorderColor = UiTheme.CardBorder;
-            _trackBg.BackColor = UiTheme.InputBg;
-
-            _thumb = new RoundedPanel();
-            _thumb.SetBounds(1, 2, 20, 8);
-            _thumb.Radius = 4;
-            _thumb.BackColor = UiTheme.TextSub;
-            _thumb.BorderColor = UiTheme.TextSub;
-            _trackBg.Controls.Add(_thumb);
-
-            _lblTouchState = new Label();
-            _lblTouchState.SetBounds(724, 36, 150, 22);
-            _lblTouchState.Text = "—";
-            _lblTouchState.ForeColor = UiTheme.TextSub;
-            _lblTouchState.TextAlign = ContentAlignment.MiddleLeft;
-
-            _lblTouchInfo = new Label();
-            _lblTouchInfo.SetBounds(16, 72, 864, 22);
-            _lblTouchInfo.Font = new Font("Consolas", 9f);
-            _lblTouchInfo.Text = "（等待 0x22 触摸事件；点【开始触摸流】开启）";
-            _lblTouchInfo.ForeColor = UiTheme.TextSub;
-            _lblTouchInfo.TextAlign = ContentAlignment.MiddleLeft;
-
-            cardTouch.Controls.AddRange(new Control[]
-            {
-                _btnTouchStart, _btnTouchStop, _trackBg, _lblTouchState, _lblTouchInfo
-            });
+            // 触摸卡片已移除（2026-10 产测流程裁剪：触摸流测试项下线，0x22 协议保留在固件侧）
 
             // 鉴权卡片
             var cardAuth = new RoundedPanel();
-            cardAuth.SetBounds(12, 340, 896, 116);
+            cardAuth.SetBounds(12, 320, 896, 116);
             cardAuth.Controls.Add(MakeCardTitle("鉴权与 AES（PING 0x01 / AES_ENC 0x10 / AES_DEC 0x11 / AUTH 0x12）"));
 
             _btnAuthRun = MakeButton("运行鉴权测试", 16, 32, 120, 30, true, OnAuthRun);
@@ -247,7 +226,7 @@ namespace BibooUxTool
 
             // 日志与记录卡片
             var cardLog = new RoundedPanel();
-            cardLog.SetBounds(12, 464, 896, 224);
+            cardLog.SetBounds(12, 444, 896, 232);
             cardLog.Controls.Add(MakeCardTitle("日志与记录"));
 
             _txtLog = new RichTextBox();
@@ -272,7 +251,7 @@ namespace BibooUxTool
                 _txtLog, _btnClear, _btnExport, _lblSummary
             });
 
-            Controls.AddRange(new Control[] { cardDevice, cardMouse, cardTouch, cardAuth, cardLog });
+            Controls.AddRange(new Control[] { cardDevice, cardMouse, cardAuth, cardLog });
 
             UpdateSummary();
         }
@@ -298,10 +277,10 @@ namespace BibooUxTool
             return b;
         }
 
-        private Panel MakeLed(string letter, int x, int y)
+        private Panel MakeLed(string letter, int x, int y, int w = 44, int h = 24)
         {
             var p = new Panel();
-            p.SetBounds(x, y, 44, 24);
+            p.SetBounds(x, y, w, h);
             p.Tag = letter;
             p.Font = UiTheme.FontTitle;
             p.BackColor = Color.White;
@@ -355,6 +334,7 @@ namespace BibooUxTool
                 SetLed(_ledL, false);
                 SetLed(_ledM, false);
                 SetLed(_ledR, false);
+                ResetMouseView();
             }
 
             UpdateFtStatus();
@@ -374,8 +354,6 @@ namespace BibooUxTool
             _btnFtStop.Enabled = connected && _ftActive;
             _btnRefresh.Enabled = connected;
             _btnDutDisc.Enabled = connected && _dutUp;
-            _btnTouchStart.Enabled = connected && _ftActive;
-            _btnTouchStop.Enabled = connected && _ftActive;
             _btnAuthRun.Enabled = connected && _ftActive;
         }
 
@@ -464,6 +442,32 @@ namespace BibooUxTool
                 SetLed(_ledM, (btn & 0x04) != 0);
                 SetLed(_ledR, (btn & 0x02) != 0);
 
+                // 组合键：左键+右键同时按下 -> 清空所有记录（与"清空记录"按钮等效）；
+                // 锁存防止按住期间每帧重复触发，需两键都松开后才能再次触发
+                bool clrCombo = (btn & 0x03) == 0x03;
+                if (clrCombo && !_clrComboLatch)
+                {
+                    _clrComboLatch = true;
+                    OnClear(null, EventArgs.Empty);
+                    LogLine("组合键 左键+右键：已清空所有记录", UiTheme.Primary);
+                }
+                else if (!clrCombo)
+                {
+                    _clrComboLatch = false;
+                }
+
+                // 可视化视图：XY 轨迹 + 滚轮条 / 滚轮累计
+                _viewXY.Feed(x, y);
+                _viewWheel.Feed(wheel);
+                _wheelTotal += wheel;
+                string wtxt = (_wheelTotal > 0 ? "+" : string.Empty) + _wheelTotal;
+                if (_lblWheelVal.Text != wtxt)
+                {
+                    _lblWheelVal.Text = wtxt;
+                    _lblWheelVal.ForeColor = _wheelTotal > 0 ? UiTheme.Primary
+                        : (_wheelTotal < 0 ? UiTheme.Danger : UiTheme.TextSub);
+                }
+
                 string cnt = string.Format("累计 {0}", _mouseCount);
                 if (_lblMouseCnt.Text != cnt)
                     _lblMouseCnt.Text = cnt;
@@ -487,35 +491,7 @@ namespace BibooUxTool
 
         private void OnSppFrameEvent(byte[] spp)
         {
-            bool pressed;
-            int pos;
-            byte seq;
-            if (UxFtProto.ParseTouch(spp, out pressed, out pos, out seq))
-            {
-                _touchCount++;
-
-                Color tone = pressed ? UiTheme.Primary : UiTheme.TextSub;
-                if (_thumb.BackColor != tone)
-                {
-                    _thumb.BackColor = tone;
-                    _thumb.BorderColor = tone;
-                    _thumb.Invalidate();
-                }
-                _thumb.Left = ThumbLeft(pos);
-
-                string state = pressed ? "按下" : "抬起";
-                if (_lblTouchState.Text != state)
-                {
-                    _lblTouchState.Text = state;
-                    _lblTouchState.ForeColor = tone;
-                }
-
-                _lblTouchInfo.Text = string.Format("seq={0}   pressed={1}   pos={2} / {3}   累计 {4} 条",
-                    seq, pressed ? 1 : 0, pos, TouchPosMax, _touchCount);
-                return;
-            }
-
-            LogLine("SPP 帧（非 0x22）: " + Hex(spp), UiTheme.TextSub);
+            LogLine("SPP 帧（非响应）: " + Hex(spp), UiTheme.TextSub);
         }
 
         private void SendStatusQuery()
@@ -620,59 +596,6 @@ namespace BibooUxTool
             else
             {
                 LogLine("DUT_DISCONNECT 返回 status=" + rsp[UxFtProto.UlOffsStatus], UiTheme.Danger);
-            }
-        }
-
-        private void OnTouchStart(object sender, EventArgs e)
-        {
-            if (!RequireConnected())
-                return;
-            SendTouchCmd(UxFtProto.DutCmdTouchStart, "TOUCH_START");
-        }
-
-        private void OnTouchStop(object sender, EventArgs e)
-        {
-            if (!RequireConnected())
-                return;
-            SendTouchCmd(UxFtProto.DutCmdTouchStop, "TOUCH_STOP");
-        }
-
-        private void SendTouchCmd(byte cmd, string what)
-        {
-            byte[] rsp;
-            string err;
-            int r = _link.SendSppFrameWait(NewSppFrame(cmd), SppTimeoutMs, out rsp, out err);
-            if (r == 0)
-            {
-                LogLine(what + " 响应超时。", UiTheme.Danger);
-                return;
-            }
-            if (r < 0)
-            {
-                LogLine(what + " 失败: " + err, UiTheme.Danger);
-                if (!_link.IsConnected)
-                    HandleLinkLost();
-                return;
-            }
-
-            byte st = rsp[UxFtProto.SppOffsArgs];
-            if (st != UxFtProto.DutStOk)
-            {
-                LogLine(what + " 返回错误（" + st + "）。", UiTheme.Danger);
-                return;
-            }
-
-            LogLine(what + " 成功。", UiTheme.Success);
-            if (cmd == UxFtProto.DutCmdTouchStart)
-            {
-                _touchCount = 0;
-                _lblTouchState.Text = "流已开启";
-                _lblTouchState.ForeColor = UiTheme.Primary;
-            }
-            else
-            {
-                _lblTouchState.Text = "流已停止";
-                _lblTouchState.ForeColor = UiTheme.TextSub;
             }
         }
 
@@ -788,9 +711,9 @@ namespace BibooUxTool
             _passCount = 0;
             _failCount = 0;
             _mouseCount = 0;
-            _touchCount = 0;
             _lblMouseCnt.Text = "累计 0";
             _lblMouse.Text = "btn=--   x=--   y=--   wheel=--";
+            ResetMouseView();
             _lblAuthResult.Text = string.Empty;
             _lblAuthDetail.Text = "（点按左侧按钮：PING → AES 往返 ×3 → 鉴权响应 ×3）";
             UpdateSummary();
@@ -951,16 +874,196 @@ namespace BibooUxTool
             UpdateConnUi(false);
         }
 
-        private int ThumbLeft(int pos)
+        private void ResetMouseView()
         {
-            int usable = _trackBg.ClientSize.Width - _thumb.Width - 2;
-            if (usable < 1)
-                usable = 1;
-            if (pos < 0)
-                pos = 0;
-            if (pos > TouchPosMax)
-                pos = TouchPosMax;
-            return 1 + (int)((long)pos * usable / TouchPosMax);
+            _viewXY.ResetView();
+            _viewWheel.ResetView();
+            _wheelTotal = 0;
+            _lblWheelVal.Text = "0";
+            _lblWheelVal.ForeColor = UiTheme.TextSub;
+        }
+
+        // ---------- 鼠标可视化视图（自绘） ----------
+
+        /// <summary>
+        /// XY 位移轨迹视图：虚拟游标按 0xE1 上报的相对位移累积移动（±Range 钳制，
+        /// 绘制最近 MaxTrail 个点的轨迹折线 + 当前位置亮点。BLE 报告 y 即屏幕
+        /// 方向（向下为正，与 USB 鼠标一致），不做取反。
+        /// </summary>
+        private sealed class MouseTrackView : Panel
+        {
+            private const int Range = 512;       // 虚拟坐标 ±Range
+            private const int MaxTrail = 400;    // 轨迹点上限（超出丢弃最早的）
+
+            private Point _cursor;
+            private readonly List<Point> _trail = new List<Point>(MaxTrail + 1);
+
+            public MouseTrackView()
+            {
+                DoubleBuffered = true;
+                BackColor = UiTheme.InputBg;
+            }
+
+            public void Feed(int dx, int dy)
+            {
+                _cursor.X = Math.Max(-Range, Math.Min(Range, _cursor.X + dx));
+                _cursor.Y = Math.Max(-Range, Math.Min(Range, _cursor.Y + dy));
+                _trail.Add(_cursor);
+                if (_trail.Count > MaxTrail)
+                    _trail.RemoveRange(0, _trail.Count - MaxTrail);
+                Invalidate();
+            }
+
+            public void ResetView()
+            {
+                _cursor = Point.Empty;
+                _trail.Clear();
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle rc = ClientRectangle;
+                var center = new Point(rc.Width / 2, rc.Height / 2);
+                float sx = (rc.Width / 2f - 8f) / Range;
+                float sy = (rc.Height / 2f - 8f) / Range;
+
+                using (var penBorder = new Pen(UiTheme.CardBorder))
+                    g.DrawRectangle(penBorder, 0, 0, rc.Width - 1, rc.Height - 1);
+
+                using (var penDash = new Pen(Color.FromArgb(0xC9, 0xD4, 0xE8)) { DashStyle = DashStyle.Dash })
+                {
+                    g.DrawLine(penDash, center.X, 4, center.X, rc.Height - 4);
+                    g.DrawLine(penDash, 4, center.Y, rc.Width - 4, center.Y);
+                }
+
+                if (_trail.Count > 1)
+                {
+                    using (var pen = new Pen(UiTheme.Primary, 2f))
+                    {
+                        PointF prev = PointF.Empty;
+                        bool first = true;
+                        foreach (Point pt in _trail)
+                        {
+                            var cur = new PointF(center.X + pt.X * sx, center.Y + pt.Y * sy);
+                            if (!first)
+                                g.DrawLine(pen, prev, cur);
+                            prev = cur;
+                            first = false;
+                        }
+                    }
+                }
+
+                if (_trail.Count > 0)
+                {
+                    float px = center.X + _cursor.X * sx;
+                    float py = center.Y + _cursor.Y * sy;
+                    using (var brush = new SolidBrush(UiTheme.Primary))
+                        g.FillEllipse(brush, px - 4f, py - 4f, 8f, 8f);
+                    using (var brush = new SolidBrush(Color.White))
+                        g.FillEllipse(brush, px - 1.5f, py - 1.5f, 3f, 3f);
+                }
+                else
+                {
+                    using (var brush = new SolidBrush(Color.FromArgb(0xC9, 0xD4, 0xE8)))
+                        g.FillEllipse(brush, center.X - 3, center.Y - 3, 6, 6);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 滚轮方向方块：上块 = 上滑（wheel>0）、下块 = 下滑（wheel&lt;0）。滚轮滚动时
+        /// 对应方向方块点亮（▲ 主色 / ▼ 橙色）约 150ms 后自动熄灭，方向一眼可辨；
+        /// 累计量看旁边的大数字 Label。
+        /// </summary>
+        private sealed class WheelBarView : Panel
+        {
+            private static readonly Color WheelNeg = Color.FromArgb(0xF5, 0x9E, 0x6C);
+            private static readonly Color BlockOff = Color.FromArgb(0xE9, 0xEE, 0xF8);
+
+            private int _value;
+            private int _fade;                    // 剩余保持 tick 数（150ms × 1 ≈ 150ms）
+            private readonly Timer _fadeTimer;
+
+            public WheelBarView()
+            {
+                DoubleBuffered = true;
+                BackColor = UiTheme.InputBg;
+                _fadeTimer = new Timer { Interval = 150 };
+                _fadeTimer.Tick += OnFadeTick;
+            }
+
+            public void Feed(int wheel)
+            {
+                if (wheel != 0)
+                {
+                    _value = wheel;
+                    _fade = 1;                    // 重新点亮保持
+                    _fadeTimer.Start();
+                    Invalidate();
+                }
+            }
+
+            public void ResetView()
+            {
+                _value = 0;
+                _fade = 0;
+                _fadeTimer.Stop();
+                Invalidate();
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                    _fadeTimer.Dispose();
+                base.Dispose(disposing);
+            }
+
+            private void OnFadeTick(object sender, EventArgs e)
+            {
+                if (--_fade <= 0)
+                {
+                    _value = 0;
+                    _fadeTimer.Stop();
+                }
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle rc = ClientRectangle;
+
+                using (var penBorder = new Pen(UiTheme.CardBorder))
+                    g.DrawRectangle(penBorder, 0, 0, rc.Width - 1, rc.Height - 1);
+
+                int gap = 4;
+                int half = (rc.Height - gap) / 2;
+                var rectUp = new Rectangle(3, 3, rc.Width - 6, half - 3);
+                var rectDown = new Rectangle(3, half + gap, rc.Width - 6, rc.Height - half - gap - 3);
+
+                bool upOn = _value > 0;
+                bool downOn = _value < 0;
+
+                using (var path = RoundedPanel.RoundedRectPath(rectUp, 6))
+                using (var brush = new SolidBrush(upOn ? UiTheme.Primary : BlockOff))
+                    g.FillPath(brush, path);
+                using (var path = RoundedPanel.RoundedRectPath(rectDown, 6))
+                using (var brush = new SolidBrush(downOn ? WheelNeg : BlockOff))
+                    g.FillPath(brush, path);
+
+                // ▲ / ▼ 符号：点亮块白字，熄灭块灰字
+                using (var font = new Font("Microsoft YaHei UI", 11f, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(g, "▲", font, rectUp, upOn ? Color.White : UiTheme.TextSub,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                    TextRenderer.DrawText(g, "▼", font, rectDown, downOn ? Color.White : UiTheme.TextSub,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                }
+            }
         }
     }
 }

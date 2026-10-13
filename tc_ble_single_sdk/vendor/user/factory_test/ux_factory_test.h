@@ -31,15 +31,11 @@ void ux_factory_test_proc(void);
 int  ux_ft_host_cmd(const u8 *p, u8 *r);
 
 /* 1 while the factory-test mode is active: the host link test beacon pauses
- * (otherwise its uplink frames would interleave with the FT events) */
+ * (otherwise its uplink frames would interleave with the FT events); the
+ * host_link module also uses this to drive the 0xE1 mouse-report bypass
+ * (ux_host_link_att_mouse, top-level att_mouse hook like the LED consumer) */
 u8   ux_ft_host_active(void);
 #endif /* BIBOO_UX_HOST_LINK */
-
-/* mouse report bypass hook, called at the top of ux_mouse_fwd_att_mouse()
- * through user_module_factory_test_bypass() (user_module_manage.c).
- * Returns 1 when the report has been consumed as a 0xE1 PC event and the
- * USB forwarding must be skipped (factory-test mode active). */
-int  ux_ft_mouse_bypass(u8 *p);
 
 #endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST */
 

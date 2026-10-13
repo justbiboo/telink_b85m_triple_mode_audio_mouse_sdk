@@ -81,12 +81,13 @@ void user_module_att_mouse(u8 *p);
  * implemented by the vendor/user/led module */
 void user_module_att_mouse_led(u8 *p);
 
-/* ux_mouse_fwd_att_mouse (ux_mouse_fwd.c): factory-test bypass hook -
- * while the factory-test mode is active the BLE mouse report is reported
- * to the PC (host link 0xE1 event) instead of being forwarded to USB.
- * returns 1 to skip the USB forwarding.
- * implemented by the vendor/user/factory_test module */
-int  user_module_factory_test_bypass(u8 *p);
+/* att_mouse (blm_att.c): factory-test mouse-report mirror, called at the
+ * top level of att_mouse() just like the LED hook above. While the
+ * factory-test mode is active the BLE report is copied to the PC as a host
+ * link 0xE1 event; the USB forwarding always runs (no bypass), so the PC
+ * mouse keeps working at any time. Returns 1 when the 0xE1 mirror was sent.
+ * implemented by the vendor/user/host_link module */
+int  user_module_att_mouse_hlink(u8 *p);
 
 /* blm_host.c L2CAP notify dispatch: current value handle of the mouse
  * voice characteristic (my_Data 0xB03E); 0 = not discovered yet */

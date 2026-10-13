@@ -37,6 +37,16 @@ void ux_host_link_tx(u8 len, u8 *p);
 void ux_host_link_init(void);
 void ux_host_link_proc(void);
 
+/*att_mouse (blm_att.c): factory-test mouse-report mirror, called at the
+ *top level of att_mouse() just like the LED consumer (user_module_att_mouse_led).
+ *While the factory-test mode is active (BIBOO_UX_FACTORY_TEST, see
+ *ux_ft_host_active()) the raw BLE report is wrapped into a 0xE1 event
+ *(ux_ft_proto.h) and pushed to the PC through this link. Returns 1 when
+ *the report has been mirrored (0xE1 sent), 0 in normal mode. This is a
+ *pure mirror: the USB mouse forwarding in att_mouse() always runs, so
+ *the PC mouse keeps working at any time (no bypass).*/
+int  ux_host_link_att_mouse(u8 *p);
+
 #endif /* BIBOO_UX_HOST_LINK */
 
 

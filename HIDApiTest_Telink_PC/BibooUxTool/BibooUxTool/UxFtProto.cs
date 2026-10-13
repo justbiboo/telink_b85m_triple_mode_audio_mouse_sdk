@@ -49,13 +49,11 @@ namespace BibooUxTool
         public const byte EvtDutLink = 0xE2;   // DUT 连接/断开
         public const byte EvtFwdRsp = 0xE3;    // DUT 响应分片（SPP 重组）
 
-        // 鼠标事件字段（相对 EvtOffsData）
+        // 鼠标事件字段（相对 EvtOffsData；双端固定 4 字节布局 btn,s8 x,s8 y,s8 wheel，镜像 ux_ft_proto.h）
         public const int MouseOffsBtn = 0;
-        public const int MouseOffsXL = 1;      // s16 x，小端
-        public const int MouseOffsXH = 2;
-        public const int MouseOffsYL = 3;
-        public const int MouseOffsYH = 4;
-        public const int MouseOffsWheel = 5;
+        public const int MouseOffsX = 1;       // s8 x
+        public const int MouseOffsY = 2;       // s8 y
+        public const int MouseOffsWheel = 3;   // s8 wheel
 
         // DUT 链接事件字段（相对 EvtOffsData）
         public const int LinkOffsState = 0;
@@ -121,8 +119,8 @@ namespace BibooUxTool
                 return false;
 
             btn = frame[EvtOffsData + MouseOffsBtn];
-            x = (short)(frame[EvtOffsData + MouseOffsXL] | (frame[EvtOffsData + MouseOffsXH] << 8));
-            y = (short)(frame[EvtOffsData + MouseOffsYL] | (frame[EvtOffsData + MouseOffsYH] << 8));
+            x = (short)(unchecked((sbyte)frame[EvtOffsData + MouseOffsX]));
+            y = (short)(unchecked((sbyte)frame[EvtOffsData + MouseOffsY]));
             wheel = unchecked((sbyte)frame[EvtOffsData + MouseOffsWheel]);
             return true;
         }

@@ -61,8 +61,8 @@
 #define UX_FT_ST_BUSY               2       /*previous FT command still in flight*/
 
 /* PC -> dongle commands (downlink [0]) */
-#define UX_FT_CMD_START             0x10    /*enter factory-test mode: mouse reports bypass -> 0xE1, beacon paused*/
-#define UX_FT_CMD_STOP              0x11    /*leave factory-test mode, resume normal USB forwarding*/
+#define UX_FT_CMD_START             0x10    /*enter factory-test mode: mouse reports are mirrored to 0xE1, beacon paused*/
+#define UX_FT_CMD_STOP              0x11    /*leave factory-test mode (the USB forwarding always runs, no bypass)*/
 #define UX_FT_CMD_STATUS            0x12    /*query: active / DUT link / SPP ready / auth tick*/
 #define UX_FT_CMD_DUT_DISCONNECT    0x13    /*drop the current DUT mouse (swap unit on the line)*/
 #define UX_FT_CMD_FWD               0x40    /*one fragment of a DUT command, forwarded over SPP 0x33F3*/
@@ -79,13 +79,13 @@
 #define UX_FT_EVT_DUT_LINK          0xE2    /*DUT connected / disconnected*/
 #define UX_FT_EVT_FWD_RSP           0xE3    /*one fragment of a DUT response*/
 
-/* UX_FT_EVT_MOUSE data ([2..14]; raw BLE report fields, MOUSE_DATA_LEN_AAA layout) */
+/* UX_FT_EVT_MOUSE data ([2..14]; raw BLE report bytes, MOUSE_DATA_LEN_AAA
+ * layout - both firmware ends are fixed to 4: btn, s8 x, s8 y, s8 wheel;
+ * the PC parses these offsets per UxFtProto.cs) */
 #define UX_FT_MOUSE_OFFS_BTN        0
-#define UX_FT_MOUSE_OFFS_X_L        1       /*s16 x, little endian*/
-#define UX_FT_MOUSE_OFFS_X_H        2
-#define UX_FT_MOUSE_OFFS_Y_L        3
-#define UX_FT_MOUSE_OFFS_Y_H        4
-#define UX_FT_MOUSE_OFFS_WHEEL      5
+#define UX_FT_MOUSE_OFFS_X          1       /*s8 x*/
+#define UX_FT_MOUSE_OFFS_Y          2       /*s8 y*/
+#define UX_FT_MOUSE_OFFS_WHEEL      3       /*s8 wheel*/
 
 /* UX_FT_EVT_DUT_LINK data */
 #define UX_FT_LINK_OFFS_STATE       0

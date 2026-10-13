@@ -129,18 +129,23 @@ void ux_mouse_fwd_disconnect_evt(u8 reason)
 /*att_mouse (blm_att.c): convert the mouse BLE report to USB HID frames.
  *MOUSE_DATA_LEN_AAA = 6 (e.g. 8258_dual_mouse):
  *  p[0]:btn, p[1..2]:x(s16, little-endian), p[3..4]:y(s16), p[5]:wheel
+ *MOUSE_DATA_LEN_AAA = 4: p[0]:btn, p[1]:x(s8), p[2]:y(s8), p[3]:wheel
  *USB HID mouse report is 4 bytes (btn, s8 x, s8 y, s8 wheel),
- *  split big moves into several frames when |x| or |y| > 127*/
+ *  6-byte mode splits big moves into several frames when |x| or |y| > 127*/
 void ux_mouse_fwd_att_mouse(u8 *p)
 {
-	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST)
-	if (user_module_factory_test_bypass(p))
-	{
-		return;	/*factory-test mode: report consumed as a 0xE1 PC event*/
-	}
-	#endif
-	#if (USB_MOUSE_ENABLE)
-	#if (MOUSE_DATA_LEN_AAA == 6)
+	/*BIBOO UX: the factory-test 0xE1 bypass moved to the top level of
+	 *att_mouse (user_module_att_mouse_hlink -> ux_host_link_att_mouse),
+	 *same hook style as the LED consumer; this entry is pure USB forwarding*/
+#if (USB_MOUSE_ENABLE)
+	#if (MOUSE_DATA_LEN_AAA == 4)
+	mouse_data_t mouse_dat_report;
+	mouse_dat_report.btn = p[0];
+	mouse_dat_report.x = (s8)p[1];
+	mouse_dat_report.y = (s8)p[2];
+	mouse_dat_report.wheel = (s8)p[3];
+	usbmouse_add_frame(&mouse_dat_report, 1);
+	#elif (MOUSE_DATA_LEN_AAA == 6)
 	mouse_data_t mouse_dat_report;
 	mouse_dat_report.btn = p[0];
 	mouse_dat_report.wheel = 0; /*wheel only attached to the last frame*/
@@ -188,10 +193,16 @@ void ux_mouse_fwd_att_mouse(u8 *p)
 void ux_mouse_fwd_notify_proc(void)
 {
 	static u8 ccc_done = 0;
+	#if (BIBOO_UX_DEBUG)
+	static u8 wait_printed = 0;	/*one-shot: why the CCC write is not issued yet*/
+	#endif
 
 	if(blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
 	{
 		ccc_done = 0;  //reset for next connection
+		#if (BIBOO_UX_DEBUG)
+		wait_printed = 0;
+		#endif
 		return;
 	}
 	if(central_sdp_pending)  //SDP still ongoing
@@ -211,6 +222,15 @@ void ux_mouse_fwd_notify_proc(void)
 	}
 	if(!conn_char_handler[3] || !conn_char_handler[4] || !conn_char_handler[5])
 	{
+		#if (BIBOO_UX_DEBUG)
+		if(!wait_printed)
+		{
+			wait_printed = 1;	/*diagnose once per connection: SDP found no HID report*/
+			tlkapi_printf(APP_LOG_EN, "[DBG] HID CCC wait: H3=%x H4=%x H5=%x (sdp=%x smp=%x)\n",
+				conn_char_handler[3], conn_char_handler[4], conn_char_handler[5],
+				central_sdp_pending, central_smp_pending);
+		}
+		#endif
 		return;  //handle not ready (SDP failed or not started)
 	}
 

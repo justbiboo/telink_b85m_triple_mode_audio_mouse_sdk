@@ -69,6 +69,13 @@ void	att_mouse (u16 conn, u8 *p)
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
 	user_module_att_mouse_led(p);	/*BIBOO UX: yellow=button, green=activity (vendor/user/led)*/
 #endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+	/*BIBOO UX: same top-level hook style as the LED consumer above - while
+	 *the factory-test mode is active the report is ALSO mirrored to the PC
+	 *as a 0xE1 host link event. This never blocks the USB forwarding below:
+	 *the dongle keeps working as a normal PC mouse at any time (vendor/user/host_link)*/
+	user_module_att_mouse_hlink(p);
+#endif
 #if (USB_MOUSE_ENABLE)
 #if (MOUSE_DATA_LEN_AAA == 6)
 	/* mouse BLE report (MOUSE_DATA_LEN_AAA = 6, e.g. 8258_dual_mouse):
@@ -89,14 +96,18 @@ void	att_mouse (u16 conn, u8 *p)
 	#endif
 #elif (MOUSE_DATA_LEN_AAA == 4)
 	/* mouse BLE report (MOUSE_DATA_LEN_AAA = 4):
-	 *  p[0]:btn, p[1]:x(s8), p[2]:y(s8), p[3]:wheel - straight through,
-	 *  same layout as mouse_data_t / USB HID 8-bit X/Y report */
+	 *  p[0]:btn, p[1]:x(s8), p[2]:y(s8), p[3]:wheel - same layout as
+	 *  mouse_data_t / USB HID 8-bit X/Y report */
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_MOUSE_FWD)
+	user_module_att_mouse(p);  /*BIBOO UX: 4-byte BLE report -> USB frame straight-through, see vendor/user/mouse_fwd*/
+	#else
 	mouse_data_t mouse_dat_report;
 	mouse_dat_report.btn = *p++;
 	mouse_dat_report.x = *p++;
 	mouse_dat_report.y = *p++;
 	mouse_dat_report.wheel = *p;
 	usbmouse_add_frame(&mouse_dat_report, 1);
+	#endif
 #else
 #error "MOUSE_DATA_LEN_AAA must be 4 or 6 (see app_config.h)"
 #endif

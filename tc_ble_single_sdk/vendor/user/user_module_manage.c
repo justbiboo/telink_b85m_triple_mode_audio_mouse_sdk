@@ -32,6 +32,11 @@
 /* user module init entry (see user_module_manage.h for the hook locations) */
 void user_module_init(void)
 {
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_DEBUG)
+	/*build stamp: verify at power-up that the freshly flashed binary is the
+	 *one just built (helps catching stale firmware during line bring-up)*/
+	printf("[ux] user modules init, build " __DATE__ " " __TIME__ "\r\n");
+#endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_MIC_STREAM)
 	ux_mic_stream_init();
 #endif
@@ -79,7 +84,7 @@ void user_module_proc(void)
 	ux_host_link_proc();		/*BIBOO UX: async host link command extension point*/
 #endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP)
-	ux_spp_proc();			/*BIBOO UX: SPP rx housekeeping (reserved for production test)*/
+	ux_spp_proc();			/*BIBOO UX: enable DUT factory SPP notify (CCC) after SMP&SDP done*/
 #endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_LED)
 	ux_led_proc();			/*BIBOO UX: non-blocking LED blink engine + mouse activity window*/
@@ -137,10 +142,10 @@ void user_module_att_mouse_led(u8 *p)
 #endif
 }
 
-int user_module_factory_test_bypass(u8 *p)
+int user_module_att_mouse_hlink(u8 *p)
 {
-#if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST)
-	return ux_ft_mouse_bypass(p);
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+	return ux_host_link_att_mouse(p);
 #else
 	return 0;
 #endif

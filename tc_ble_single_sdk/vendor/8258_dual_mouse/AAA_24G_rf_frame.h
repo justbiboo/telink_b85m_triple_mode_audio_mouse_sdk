@@ -31,7 +31,7 @@
 #ifndef _AAA_24G_RF_FRAME_H_
 #define _AAA_24G_RF_FRAME_H_
 
-#define MOUSE_DATA_LEN_AAA  6
+#define MOUSE_DATA_LEN_AAA  4	//BIBOO UX: must stay in sync with AAA_app_config_Telink_QFN32.h (and the dongle end = 4)
 
 enum
 {
