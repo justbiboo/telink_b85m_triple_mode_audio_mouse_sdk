@@ -78,5 +78,15 @@ HIDApiTest_Telink_PC/BibooUxTool/**/obj/
 HIDApiTest_Telink_PC/BibooUxTool/**/*.user
 HIDApiTest_Telink_PC/BibooUxTool/build_log.txt
 
+# 产测服务器本地数据（产线记录不应入库）
+HIDApiTest_Telink_PC/FactoryTestServer/data/*.csv
+
+# 临时试验工程构建输出
+HIDApiTest_Telink_PC/SppTestDemo/obj/
+HIDApiTest_Telink_PC/SppTestDemo/bin/
+
+# 本地工作记录（agent 记忆，不入库）
+.workbuddy/
+
 #Test
 tc_ble_single_sdk_factory

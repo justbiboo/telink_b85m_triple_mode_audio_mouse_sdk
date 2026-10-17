@@ -6,9 +6,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <!-- 与 BibooHid.dll (x64) 保持一致 -->
     <PlatformTarget>x64</PlatformTarget>
-    <LangVersion>7.3</LangVersion>
+    <LangVersion>latest</LangVersion>
     <RootNamespace>BibooUxTool</RootNamespace>
-    <AssemblyName>BibooUxTool</AssemblyName>
+    <!-- 输出文件名即用户看到/双击的 exe 名；RootNamespace 保持不变，避免牵连代码 -->
+    <AssemblyName>Biboo OS</AssemblyName>
+    <Product>Biboo OS</Product>
+    <Description>Biboo OS 上位机：收发调试 / 蓝牙连接 / 产线测试</Description>
     <DebugType>embedded</DebugType>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <Version>0.1.0</Version>
@@ -17,18 +20,72 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- 简繁归一（Whisper 输出繁体→简体）用 .NET Framework 内置 Microsoft.VisualBasic.Strings.StrConv(LCMapString) -->
+    <Reference Include="Microsoft.VisualBasic" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- 构建后复制 BibooHid.dll (x64)。
          通过 sln 构建时 DLL 输出到 $(SolutionDir)x64\$(Configuration)；
          单独构建 BibooHid 工程时输出到 BibooHid\x64\$(Configuration)。
          两个位置按需复制，先存在者优先。 -->
-    <None Include="..\x64\$(Configuration)\BibooHid.dll" Link="BibooHid.dll"
-          Condition="Exists('..\x64\$(Configuration)\BibooHid.dll')">
+    <None Include="..\x64\$(Configuration)\BibooHid.dll" Link="BibooHid.dll" Condition="Exists('..\x64\$(Configuration)\BibooHid.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="..\BibooHid\x64\$(Configuration)\BibooHid.dll" Link="BibooHid.dll"
-          Condition="'$(BuildingInsideVisualStudio)' == '' And Exists('..\BibooHid\x64\$(Configuration)\BibooHid.dll')">
+    <None Include="..\BibooHid\x64\$(Configuration)\BibooHid.dll" Link="BibooHid.dll" Condition="'$(BuildingInsideVisualStudio)' == '' And Exists('..\BibooHid\x64\$(Configuration)\BibooHid.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- PC 直连 BLE（Surface 0）：WinRT Windows.Devices.Bluetooth 投影，供 net48 桌面程序使用。
+         9.0.4 起是 Microsoft.ML.Tokenizers 2.0.1 的最低要求（它同时要求 System.Text.Json ≥ 9.0.4），
+         故这两个跟它一起抬到 9.0.4；Whisper.net 只要求 ≥ 9.0.3，不冲突。 -->
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="9.0.4" />
+    <!-- 实时翻译：Whisper.net（ASR，离线 MIT）+ 原生运行时；net48 走其 netstandard2.0 资产，IAsyncEnumerable 需 Microsoft.Bcl.AsyncInterfaces 桥接 -->
+    <PackageReference Include="Whisper.net" Version="1.8.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.8.1" />
+    <!-- 实时翻译：sherpa-onnx（离线 ASR，Apache-2.0）+ SenseVoice 小模型。
+         托管的 P/Invoke 封装支持 .NETFramework4.5 / netstandard2.0，net48 可直接引用；
+         原生库由 org.k2fsa.sherpa.onnx.runtime.win-x64 提供（见下方 CopySherpaNative 目标）。 -->
+    <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.8" />
+    <!-- 离线翻译：Marian/OPUS-MT 的 ONNX 推理 + SentencePiece 分词。
+         ⚠ 这里**故意只用 Microsoft.ML.OnnxRuntime.Managed**（只有托管封装，不带原生库），不用
+         Microsoft.ML.OnnxRuntime（那个会带 runtimes\win-x64\native\onnxruntime.dll）：
+         ① 它带的 onnxruntime.dll 1.28.0 在本机 net48 进程里 DllMain 初始化失败
+            （DllNotFoundException / HRESULT 0x8007045A），sherpa 包自带的 1.28.2 实测能加载；
+         ② 两者同名，谁最后落盘谁生效，还额外触发一次 MSBuild 覆盖拷贝（本机上删已存在的
+            onnxruntime.dll 会让 MSBuild 进程栈溢出崩掉，见项目记忆）。
+         所以原生库统一由 sherpa 提供（CopySherpaNative 目标），这里只要托管 dll。—— 不要改成
+         Microsoft.ML.OnnxRuntime。 -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.28.0" />
+    <PackageReference Include="Microsoft.ML.Tokenizers" Version="2.0.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.Contracts" Version="10.0.19041.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- Argos HTTP MT 客户端解析用（net48 需显式引包）；9.0.4 是 Microsoft.ML.Tokenizers 2.0.1 的下限 -->
+    <PackageReference Include="System.Text.Json" Version="9.0.4" />
+  </ItemGroup>
+
+  <!-- 构建后把 Whisper.net 的原生库（whisper.dll / ggml-*.dll）从 runtimes\win-x64 拷到 exe 同目录。
+       .NET Framework 的 DllImport 只从 app 基目录解析原生库，不认 runtimes\ 子目录；
+       不拷则运行 WhisperFactory.FromPath 会 DllNotFoundException。项目锁定 x64，故只拷 win-x64。 -->
+  <Target Name="CopyWhisperNative" AfterTargets="Build">
+    <ItemGroup>
+      <_WhisperNative Include="$(OutDir)runtimes/win-x64/*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_WhisperNative)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- 构建后把 sherpa-onnx 的原生库（sherpa-onnx-c-api.dll / onnxruntime.dll）拷到 exe 同目录。
+       托管封装里 Dll.Filename = "sherpa-onnx-c-api"，.NET Framework 的 DllImport 只从 app 基目录解析，
+       不认 runtimes\win-x64\native\ 子目录；不拷则 new OfflineRecognizer() 会 DllNotFoundException。
+       两处来源都覆盖：① NuGet 包目录（直接构建时）② 已复制到输出目录的（sln 构建时）。 -->
+  <Target Name="CopySherpaNative" AfterTargets="Build">
+    <ItemGroup>
+      <_SherpaNative Include="$(NuGetPackageRoot)org.k2fsa.sherpa.onnx.runtime.win-x64/1.13.8/runtimes/win-x64/native/*.dll" />
+      <_SherpaNative Include="$(OutDir)runtimes/win-x64/native/*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_SherpaNative)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

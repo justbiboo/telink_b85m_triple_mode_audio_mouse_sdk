@@ -14,7 +14,8 @@ namespace BibooUxTool
     /// 读通道约定：本页自持 DongleLink 实例，以 50ms UI 定时器 Pump 排空上行帧；
     /// 按钮操作在 UI 线程内阻塞等待（SendCommand / SendSppFrameWait 内部也走 Pump），
     /// WinForms 定时器与按钮回调不会并发 —— 单消费者模型。
-    /// 打开本页前须先断开 MainForm 的连接（同一 HID 通道独占）。
+    /// 与收发调试页（DongleForm）共用同一 HID 通道，须独占：
+    /// 由首页 HomeForm 逐个模态进入即可保证两者不会同时打开。
     /// </summary>
     public sealed class FactoryTestForm : Form
     {
@@ -58,6 +59,11 @@ namespace BibooUxTool
         private Label _lblSummary;
         private GradientButton _btnClear;
         private GradientButton _btnExport;
+
+        // 服务器对接（demo：上报产测记录到中央 Windows 服务器）
+        private TextBox _txtServerUrl;
+        private TextBox _txtStation;
+        private GradientButton _btnUpload;
 
         // 产测状态镜像（由 STATUS 查询 / 0xE2 事件维护）
         private bool _ftActive;
@@ -239,7 +245,7 @@ namespace BibooUxTool
             cardLog.Controls.Add(MakeCardTitle("日志与记录"));
 
             _txtLog = new RichTextBox();
-            _txtLog.SetBounds(16, 32, 864, 148);
+            _txtLog.SetBounds(16, 32, 864, 120);
             _txtLog.ReadOnly = true;
             _txtLog.BorderStyle = BorderStyle.None;
             _txtLog.BackColor = UiTheme.InputBg;
@@ -247,17 +253,29 @@ namespace BibooUxTool
             _txtLog.Font = new Font("Consolas", 9f);
             _txtLog.DetectUrls = false;
 
-            _btnClear = MakeButton("清空记录", 16, 188, 84, 26, false, OnClear);
-            _btnExport = MakeButton("导出", 108, 188, 84, 26, false, OnExport);
+            _btnClear = MakeButton("清空记录", 16, 186, 84, 26, false, OnClear);
+            _btnExport = MakeButton("导出", 108, 186, 84, 26, false, OnExport);
+
+            _txtServerUrl = new TextBox();
+            _txtServerUrl.SetBounds(16, 158, 340, 23);
+            _txtServerUrl.Text = "http://127.0.0.1:8081";
+            _txtServerUrl.BackColor = UiTheme.InputBg;
+
+            _txtStation = new TextBox();
+            _txtStation.SetBounds(362, 158, 80, 23);
+            _txtStation.Text = "ST-01";
+            _txtStation.BackColor = UiTheme.InputBg;
+
+            _btnUpload = MakeButton("上报服务器", 450, 156, 110, 26, false, OnUpload);
 
             _lblSummary = new Label();
-            _lblSummary.SetBounds(206, 190, 660, 22);
+            _lblSummary.SetBounds(206, 188, 660, 22);
             _lblSummary.ForeColor = UiTheme.TextSub;
             _lblSummary.TextAlign = ContentAlignment.MiddleLeft;
 
             cardLog.Controls.AddRange(new Control[]
             {
-                _txtLog, _btnClear, _btnExport, _lblSummary
+                _txtLog, _btnClear, _btnExport, _txtServerUrl, _txtStation, _btnUpload, _lblSummary
             });
 
             Controls.AddRange(new Control[] { cardDevice, cardMouse, cardAuth, cardLog });
@@ -782,6 +800,27 @@ namespace BibooUxTool
                 pass, fail, _passCount, _failCount);
             LogLine(string.Format("鉴权测试完成：通过 {0} / 失败 {1}。", pass, fail),
                 fail == 0 ? UiTheme.Success : UiTheme.Danger);
+        }
+
+        private async void OnUpload(object sender, EventArgs e)
+        {
+            if (_results.Count == 0)
+            {
+                LogLine("没有可上报的记录（先跑一次鉴权测试）。", UiTheme.TextSub);
+                return;
+            }
+            string baseUrl = _txtServerUrl.Text.Trim().TrimEnd('/');
+            string station = _txtStation.Text.Trim();
+            if (string.IsNullOrEmpty(baseUrl))
+            {
+                LogLine("服务器地址为空。", UiTheme.Danger);
+                return;
+            }
+            LogLine("上报 " + _results.Count + " 条记录到 " + baseUrl + " ...", UiTheme.TextSub);
+            bool ok = await FactoryTestUploader.UploadAsync(baseUrl, station, string.Empty,
+                _dutName, _dutMac, _results, _passCount, _failCount).ConfigureAwait(false);
+            LogLine(ok ? "上报成功（服务器已存 " + _results.Count + " 条）。"
+                      : "上报失败：服务器不可达或返回错误。", ok ? UiTheme.Success : UiTheme.Danger);
         }
 
         private void OnClear(object sender, EventArgs e)

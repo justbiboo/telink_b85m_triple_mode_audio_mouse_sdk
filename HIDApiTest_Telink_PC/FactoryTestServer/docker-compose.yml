@@ -1,0 +1,26 @@
+# 产线测试数据汇总服务（demo）—— 部署编排
+#
+# 飞牛 fnOS / 任意 Linux NAS 部署：
+#   1) 把 FactoryTestServer 整个目录拷到 NAS（如 /vol1/1000/factory-test-server）
+#   2) 在目录下写 .env 指定数据真实落盘位置（见下方 FT_STORE）
+#   3) docker compose up -d --build
+#   4) 浏览器打开 http://<NAS内网IP>:8081 看板；上位机「服务器地址」填 http://<NAS内网IP>:8081
+#
+# ⚠ demo 无鉴权，仅限可信内网
+
+services:
+  factory-test-server:
+    build: .
+    image: factory-test-server:demo
+    container_name: factory-test-server
+    restart: unless-stopped          # 随 NAS 开机自动拉起
+    environment:
+      TZ: Asia/Shanghai
+      FT_DATA_DIR: /data
+      FT_PORT: "8081"
+    ports:
+      - "${FT_PORT:-8081}:8081"
+    volumes:
+      # CSV 落盘位置：改成 NAS 存储池里的真实目录，别放系统盘
+      # 例：/vol1/1000/FactoryTest:/data   （飞牛的存储池通常是 /vol1/~/）
+      - "${FT_STORE:-./data}:/data"
