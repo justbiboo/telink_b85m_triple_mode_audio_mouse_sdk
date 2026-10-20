@@ -267,14 +267,14 @@
 #define ID_VENDOR				0x2657			// for report
 #define ID_PRODUCT_BASE			0x5862
 #define STRING_VENDOR			L"Telink"
-#define STRING_PRODUCT			L"BLE Remote KMA Dongle"
+#define STRING_PRODUCT			L"Biboo OS Audio Dongle"
 #define STRING_SERIAL			L"TLSR8278"
 #else
 //////////// product  Information  //////////////////////////////
 #define ID_VENDOR				0x2657			// for report
 #define ID_PRODUCT_BASE			0x5862
 #define STRING_VENDOR			L"Telink"
-#define STRING_PRODUCT			L"BLE Remote KMA Dongle"
+#define STRING_PRODUCT			L"Biboo OS Audio Dongle"
 #define STRING_SERIAL			L"TLSR8278"
 #endif
 
