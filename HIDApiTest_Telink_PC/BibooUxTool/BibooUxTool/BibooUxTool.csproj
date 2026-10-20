@@ -14,7 +14,10 @@
     <Description>Biboo OS 上位机：收发调试 / 蓝牙连接 / 产线测试</Description>
     <DebugType>embedded</DebugType>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <Version>0.1.0</Version>
+    <!-- 发布版本号：1.0.0 = 首个对外功能完整版（SenseVoice + 混元 Hy-MT2 38 语种 + Kokoro TTS 朗读）。
+         发版时同步更新打包脚本里的 VERSION 常量与 zip 文件名。 -->
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
     <Product>Biboo UX Tool</Product>
     <ApplicationIcon>Resources\ip_hero_pose.ico</ApplicationIcon>
   </PropertyGroup>

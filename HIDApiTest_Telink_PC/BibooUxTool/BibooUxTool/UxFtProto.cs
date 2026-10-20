@@ -38,6 +38,10 @@ namespace BibooUxTool
         public const byte CmdDutInfo = 0x14;         // 查询 DUT 本地名（连接时 ADV 缓存），12B
         public const byte CmdDutMac = 0x15;          // 查询 DUT 对端 MAC，6B
         public const byte CmdFwd = 0x40;             // DUT 命令分片，经 SPP 0x33F3 转发
+        public const byte CmdMstat = 0x03;           // 鼠标链路计数器（诊断，镜像 dongle MSTAT 0x03）：args[0]=组 / 0xFF 清零
+        public const byte MstatGroup0 = 0;           // → att_rx / ring_in / ring_drop
+        public const byte MstatGroup1 = 1;           // → tx_ok / epq / fifo_drop
+        public const byte MstatReset = 0xFF;         // 清零全部计数器
 
         // STATUS 响应数据（相对 UlOffsData）
         public const int StsOffsActive = 0;    // 1 = 产测模式激活
@@ -161,6 +165,41 @@ namespace BibooUxTool
             pos = spp[TouchOffsPosL] | (spp[TouchOffsPosH] << 8);
             seq = spp[TouchOffsSeq];
             return true;
+        }
+
+        // ===== MSTAT 计数器（鼠标链路诊断） =====
+
+        /// <summary>计数器显示名，索引即组内序号：0..2=组0，3..5=组1。</summary>
+        public static readonly string[] MstatNames =
+        {
+            "BLE收帧 att_rx",   // 组0：att_mouse 收到的 BLE 鼠标报告总数
+            "进ring ring_in",   // 组0：写入转发环形缓冲的帧数
+            "ring丢 ring_drop", // 组0：ring 缓冲满丢弃的帧数（dongle 丢帧）
+            "USB发出 tx_ok",    // 组1：成功写入 USB 端点的帧数
+            "EP忙排队 epq",     // 组1：端点忙转入 usb_fifo 的帧数
+            "fifo丢 fifo_drop", // 组1：usb_fifo 满丢弃的帧数（dongle 丢帧，与键盘共用 FIFO）
+        };
+
+        /// <summary>解析 MSTAT 响应（15B 上行帧）：status + 3×u32 小端。返回 false 表示帧格式不符。</summary>
+        public static bool ParseMstat(byte[] frame, out byte status, out uint c0, out uint c1, out uint c2)
+        {
+            status = 0; c0 = 0; c1 = 0; c2 = 0;
+            if (frame == null || frame.Length < HlinkSize)
+                return false;
+            if (frame[UlOffsCmd] != (byte)(CmdMstat | RspMask))
+                return false;
+
+            status = frame[UlOffsStatus];
+            int d = UlOffsData;
+            c0 = Le32(frame, d);
+            c1 = Le32(frame, d + 4);
+            c2 = Le32(frame, d + 8);
+            return true;
+        }
+
+        private static uint Le32(byte[] f, int o)
+        {
+            return (uint)(f[o] | (f[o + 1] << 8) | (f[o + 2] << 16) | (f[o + 3] << 24));
         }
     }
 
