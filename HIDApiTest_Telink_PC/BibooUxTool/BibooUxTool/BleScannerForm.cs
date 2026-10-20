@@ -363,9 +363,8 @@ namespace BibooUxTool
         }
 
         /// <summary>
-        /// 内容列居中：窗口拉宽时卡片限宽（≤1000）整体居中，两侧留白，
-        /// 不再拉伸成「左边内容、右边一大片空白」的长条；窗口比设计窄时
-        /// 卡片等比收窄（最小 240px，MinimumSize 已挡下绝大多数情况）。
+        /// 内容列自适应：卡片铺满可用宽度（最大化时整体放大，不再限宽 1000 并两侧留白）；
+        /// 窗口过窄时按最小宽度 240px 兜底。
         /// 卡片不设左右锚定（锚定会强制拉伸），位置/宽度由此统一管理；
         /// 卡片内部控件仍靠各自锚点跟随卡片宽度（右侧按钮列/预留边距都不受影响）。
         /// </summary>
@@ -377,8 +376,8 @@ namespace BibooUxTool
             int avail = ClientSize.Width - margin * 2;
             if (avail < 240)
                 avail = 240;
-            int w = Math.Min(ContentMaxWidth, avail);
-            int x = (ClientSize.Width - w) / 2;
+            int w = avail;                 // 铺满：最大化时整体放大（与翻译页一致）
+            int x = margin;
             foreach (var card in _contentCards)
                 card.SetBounds(x, card.Top, w, card.Height);
         }

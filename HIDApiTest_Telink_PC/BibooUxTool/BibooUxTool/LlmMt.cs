@@ -252,6 +252,27 @@ namespace BibooUxTool
             return false;
         }
 
+        /// <summary>
+        /// 预热：确保 llama-server 在跑（必要时拉起并等 /health 就绪），再打一次极短译文。
+        /// 第二次那步很关键——llama-server 启动后**第一次**请求还要付 prompt 计算、KV 缓存分配、
+        /// 分词器首次构建等一次性开销（本机实测 1~2s），空跑一句「你好」就能把这笔开销提前付掉，
+        /// 用户正式翻译第一句就不会卡。
+        /// </summary>
+        public async Task<bool> WarmupAsync()
+        {
+            if (!await EnsureServerAsync().ConfigureAwait(false))
+                return false;
+            try
+            {
+                await TranslateAsync("你好", "zh", "en").ConfigureAwait(false);
+            }
+            catch
+            {
+                // 空跑失败不影响「服务已就绪」这个结论
+            }
+            return true;
+        }
+
         public async Task<string> TranslateAsync(string text, string srcLang, string dstLang)
         {
             if (string.IsNullOrWhiteSpace(text))
@@ -338,7 +359,7 @@ namespace BibooUxTool
     ///             且译文质量明显更好（官方 FLORES-200 口径已超 Microsoft Translator / 豆包翻译 API）。
     /// 两者都全离线：llama-server 只监听 127.0.0.1，不联网。
     /// </summary>
-    public sealed class SenseVoiceHyMtEngine : ITranslationEngine
+    public sealed class SenseVoiceHyMtEngine : ITranslationEngine, IWarmupEngine
     {
         private readonly SenseVoiceAsrEngine _asr = new SenseVoiceAsrEngine();
         private readonly LlamaCppMtClient _mt = new LlamaCppMtClient();
@@ -379,6 +400,22 @@ namespace BibooUxTool
         public Task<string> TranslateTextAsync(string text, string srcLang, string dstLang)
         {
             return _mt.TranslateAsync(text, srcLang, dstLang);
+        }
+
+        /// <summary>
+        /// 预热两条腿并行：SenseVoice 模型加载（读 228MB int8 + 建 ORT 会话）与
+        /// llama-server 拉起 + 首句空跑（读 1.1GB gguf + prompt 计算）。
+        /// 两者互不依赖，并行能把「进页面 → 可用」的总等待压到较慢的那条（llama-server ≈3~5s）。
+        /// </summary>
+        public async Task<bool> WarmupAsync(string srcLang, string dstLang)
+        {
+            Task<bool> asrTask = Task.Run(() => _asr.WarmupAsync(srcLang, dstLang));
+            Task<bool> mtTask = Task.Run(() => _mt.WarmupAsync());
+
+            bool asrOk = false, mtOk = false;
+            try { asrOk = await asrTask.ConfigureAwait(false); } catch { }
+            try { mtOk = await mtTask.ConfigureAwait(false); } catch { }
+            return asrOk && mtOk;
         }
     }
 }

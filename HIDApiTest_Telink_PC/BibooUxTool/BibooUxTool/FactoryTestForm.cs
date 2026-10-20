@@ -21,10 +21,25 @@ namespace BibooUxTool
     {
         private const int SppTimeoutMs = 3000;  // SPP 命令响应等待（含分片桥接往返）
 
+        // 布局常量：卡片统一外边距 12、卡片间距 8，前 3 张卡高度固定，日志卡吃掉剩余高度。
+        // 设计尺寸 ClientSize(920x688) 下日志卡正好 232px（= 688 - 12 - 444），与旧版坐标一致。
+        private const int CardMargin = 12;
+        private const int CardGap = 8;
+        private const int DeviceCardHeight = 96;
+        private const int MouseCardHeight = 196;
+        private const int AuthCardHeight = 116;
+        private const int LogCardMinHeight = 220;
+
         private static readonly Color LedOffColor = Color.FromArgb(0xE3, 0xE9, 0xF5);
 
         private readonly DongleLink _link = new DongleLink();
         private Timer _timer;
+
+        // 内容卡片（位置与尺寸由 LayoutContent 统一管理：宽度铺满、日志卡吸收多余高度）
+        private RoundedPanel _cardDevice;
+        private RoundedPanel _cardMouse;
+        private RoundedPanel _cardAuth;
+        private RoundedPanel _cardLog;
 
         // 设备卡片
         private GradientButton _btnConnect;
@@ -108,8 +123,7 @@ namespace BibooUxTool
             BackColor = UiTheme.FormBg;
             Font = UiTheme.FontBody;
             ClientSize = new Size(920, 688);
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
+            MinimumSize = new Size(900, 660);
             StartPosition = FormStartPosition.CenterParent;
 
             try
@@ -123,7 +137,9 @@ namespace BibooUxTool
 
             // 设备卡片
             var cardDevice = new RoundedPanel();
-            cardDevice.SetBounds(12, 12, 896, 96);
+            cardDevice.SetBounds(12, CardMargin, 896, DeviceCardHeight);
+            cardDevice.Anchor = AnchorStyles.Top;   // 宽度由 LayoutContent 统一设置
+            _cardDevice = cardDevice;
             cardDevice.Controls.Add(MakeCardTitle("Host Link"));
 
             _btnConnect = MakeButton("连接", 16, 32, 92, 30, true, OnConnect);
@@ -134,14 +150,18 @@ namespace BibooUxTool
 
             _lblDevStatus = new Label();
             _lblDevStatus.SetBounds(530, 36, 350, 22);
+            _lblDevStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblDevStatus.TextAlign = ContentAlignment.MiddleLeft;
+            _lblDevStatus.AutoSize = false;
             _lblDevStatus.AutoEllipsis = true;
 
             _lblFtStatus = new Label();
             _lblFtStatus.SetBounds(16, 66, 864, 22);
+            _lblFtStatus.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblFtStatus.ForeColor = UiTheme.TextSub;
             _lblFtStatus.Font = new Font("Consolas", 9f);
             _lblFtStatus.TextAlign = ContentAlignment.MiddleLeft;
+            _lblFtStatus.AutoSize = false;
 
             // 状态行字段说明（悬停提示；DUT 名字/MAC 来自 0x14 DUT_INFO / 0x15 DUT_MAC 查询）
             _tips.SetToolTip(_lblFtStatus,
@@ -157,7 +177,9 @@ namespace BibooUxTool
 
             // 鼠标报告卡片
             var cardMouse = new RoundedPanel();
-            cardMouse.SetBounds(12, 116, 896, 196);
+            cardMouse.SetBounds(12, CardMargin + DeviceCardHeight + CardGap, 896, MouseCardHeight);
+            cardMouse.Anchor = AnchorStyles.Top;
+            _cardMouse = cardMouse;
             cardMouse.Controls.Add(MakeCardTitle("鼠标报告"));
 
             _lblMouse = new Label();
@@ -173,9 +195,13 @@ namespace BibooUxTool
             _lblMouseCnt.TextAlign = ContentAlignment.MiddleLeft;
 
             // 按键按钮：绿色 = 按下（L=bit0 / M=bit2 / R=bit1）
+            // 靠右锚定：窗口拉宽时三个指示灯跟着贴到右边
             _ledL = MakeLed("L", 656, 30, 64, 30);
             _ledM = MakeLed("M", 728, 30, 64, 30);
             _ledR = MakeLed("R", 800, 30, 64, 30);
+            _ledL.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _ledM.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _ledR.Anchor = AnchorStyles.Top | AnchorStyles.Right;
 
             // XY 位移轨迹视图（左）：虚拟游标按上报的相对位移累积，绘制轨迹折线
             _viewXY = new MouseTrackView();
@@ -195,6 +221,8 @@ namespace BibooUxTool
 
             var lblMouseHint = new Label();
             lblMouseHint.SetBounds(384, 62, 480, 120);
+            lblMouseHint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            lblMouseHint.AutoSize = false;
             lblMouseHint.Text = "按键映射：L=bit0 / M=bit2 / R=bit1（绿色 = 按下）\r\n"
                 + "XY 视图：随上报位移绘制轨迹，碰边自动钳制\r\n"
                 + "滚轮：上滑点亮上方块、下滑点亮下方块；左侧大数字为累计代数和\r\n"
@@ -212,7 +240,9 @@ namespace BibooUxTool
 
             // 鉴权卡片
             var cardAuth = new RoundedPanel();
-            cardAuth.SetBounds(12, 320, 896, 116);
+            cardAuth.SetBounds(12, CardMargin + DeviceCardHeight + MouseCardHeight + CardGap * 2, 896, AuthCardHeight);
+            cardAuth.Anchor = AnchorStyles.Top;
+            _cardAuth = cardAuth;
             cardAuth.Controls.Add(MakeCardTitle("鉴权与 AES（PING 0x01 / AES_ENC 0x10 / AES_DEC 0x11 / AUTH 0x12）"));
 
             _btnAuthRun = MakeButton("运行鉴权测试", 16, 32, 120, 30, true, OnAuthRun);
@@ -224,12 +254,16 @@ namespace BibooUxTool
 
             _lblAuthDetail = new Label();
             _lblAuthDetail.SetBounds(280, 38, 600, 22);
+            _lblAuthDetail.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _lblAuthDetail.AutoSize = false;
             _lblAuthDetail.Text = "（点按左侧按钮：PING → AES 往返 ×3 → 鉴权响应 ×3）";
             _lblAuthDetail.ForeColor = UiTheme.TextSub;
             _lblAuthDetail.TextAlign = ContentAlignment.MiddleLeft;
 
             var lblAuthHint = new Label();
             lblAuthHint.SetBounds(16, 72, 864, 22);
+            lblAuthHint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            lblAuthHint.AutoSize = false;
             lblAuthHint.Text = "期望值由 PC 侧同密钥 AES-128 独立计算：随机 16B 加解密往返、随机 8B challenge（8B+8B 零填充）密文比对。";
             lblAuthHint.ForeColor = UiTheme.TextSub;
             lblAuthHint.TextAlign = ContentAlignment.MiddleLeft;
@@ -239,13 +273,16 @@ namespace BibooUxTool
                 _btnAuthRun, _lblAuthResult, _lblAuthDetail, lblAuthHint
             });
 
-            // 日志与记录卡片
+            // 日志与记录卡片（高度由 LayoutContent 按窗口剩余空间分配）
             var cardLog = new RoundedPanel();
-            cardLog.SetBounds(12, 444, 896, 232);
+            cardLog.SetBounds(12, CardMargin + DeviceCardHeight + MouseCardHeight + AuthCardHeight + CardGap * 3, 896, 232);
+            cardLog.Anchor = AnchorStyles.Top;
+            _cardLog = cardLog;
             cardLog.Controls.Add(MakeCardTitle("日志与记录"));
 
             _txtLog = new RichTextBox();
             _txtLog.SetBounds(16, 32, 864, 120);
+            _txtLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             _txtLog.ReadOnly = true;
             _txtLog.BorderStyle = BorderStyle.None;
             _txtLog.BackColor = UiTheme.InputBg;
@@ -253,23 +290,33 @@ namespace BibooUxTool
             _txtLog.Font = new Font("Consolas", 9f);
             _txtLog.DetectUrls = false;
 
+            // 底部两行：服务器行（URL / 工位 / 上报）与记录行（清空 / 导出 / 统计）
+            // 全部靠 Bottom 锚定，窗口变高时保持贴底，多出来的高度全部给日志框。
             _btnClear = MakeButton("清空记录", 16, 186, 84, 26, false, OnClear);
+            _btnClear.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+
             _btnExport = MakeButton("导出", 108, 186, 84, 26, false, OnExport);
+            _btnExport.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
 
             _txtServerUrl = new TextBox();
-            _txtServerUrl.SetBounds(16, 158, 340, 23);
+            _txtServerUrl.SetBounds(16, 158, 642, 23);
+            _txtServerUrl.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             _txtServerUrl.Text = "http://127.0.0.1:8081";
             _txtServerUrl.BackColor = UiTheme.InputBg;
 
             _txtStation = new TextBox();
-            _txtStation.SetBounds(362, 158, 80, 23);
+            _txtStation.SetBounds(666, 158, 80, 23);
+            _txtStation.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             _txtStation.Text = "ST-01";
             _txtStation.BackColor = UiTheme.InputBg;
 
-            _btnUpload = MakeButton("上报服务器", 450, 156, 110, 26, false, OnUpload);
+            _btnUpload = MakeButton("上报服务器", 754, 156, 110, 26, false, OnUpload);
+            _btnUpload.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
 
             _lblSummary = new Label();
-            _lblSummary.SetBounds(206, 188, 660, 22);
+            _lblSummary.SetBounds(206, 188, 658, 22);
+            _lblSummary.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            _lblSummary.AutoSize = false;
             _lblSummary.ForeColor = UiTheme.TextSub;
             _lblSummary.TextAlign = ContentAlignment.MiddleLeft;
 
@@ -281,6 +328,50 @@ namespace BibooUxTool
             Controls.AddRange(new Control[] { cardDevice, cardMouse, cardAuth, cardLog });
 
             UpdateSummary();
+            LayoutContent();   // 按当前 ClientSize 归一化一次，避免首帧仍用设计坐标
+        }
+
+        /// <summary>
+        /// 内容列自适应（与首页/蓝牙/收发/翻译四页同一套规则）：
+        /// 卡片铺满可用宽度（最大化时整体放大，不再保持 896 设计宽度留白）；
+        /// 纵向 Device/Mouse/Auth 三卡固定高，日志卡吸收剩余高度并把多出来的高度让给日志框。
+        /// 卡片只设 Top 锚点（宽度/高度由此统一管理），内部控件靠 Left|Right / Bottom 锚点跟随。
+        /// </summary>
+        private void LayoutContent()
+        {
+            int availW = ClientSize.Width - CardMargin * 2;
+            if (availW < 300)
+                availW = 300;
+
+            int y = CardMargin;
+            if (_cardDevice != null)
+            {
+                _cardDevice.SetBounds(CardMargin, y, availW, DeviceCardHeight);
+                y += DeviceCardHeight + CardGap;
+            }
+            if (_cardMouse != null)
+            {
+                _cardMouse.SetBounds(CardMargin, y, availW, MouseCardHeight);
+                y += MouseCardHeight + CardGap;
+            }
+            if (_cardAuth != null)
+            {
+                _cardAuth.SetBounds(CardMargin, y, availW, AuthCardHeight);
+                y += AuthCardHeight + CardGap;
+            }
+            if (_cardLog != null)
+            {
+                int logH = ClientSize.Height - y - CardMargin;
+                if (logH < LogCardMinHeight)
+                    logH = LogCardMinHeight;
+                _cardLog.SetBounds(CardMargin, y, availW, logH);
+            }
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            LayoutContent();
         }
 
         private static Label MakeCardTitle(string text)
@@ -291,6 +382,8 @@ namespace BibooUxTool
             lbl.Font = UiTheme.FontTitle;
             lbl.ForeColor = UiTheme.TextMain;
             lbl.TextAlign = ContentAlignment.MiddleLeft;
+            lbl.AutoSize = false;   // 关掉自动宽度：长标题否则会溢出卡片被裁切
+            lbl.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             return lbl;
         }
 

@@ -287,6 +287,19 @@ namespace BibooUxTool
     }
 
     /// <summary>
+    /// 可选接口：可「预热」的引擎。
+    /// 动机：SenseVoice 模型（228MB int8）与 llama-server（1.1GB gguf）都是**懒加载**的——
+    /// 第一次翻译时才现场加载，用户要干等好几秒（llama-server 还要起进程 + 等 /health）。
+    /// 实现本接口后，翻译页**一打开**就在后台把模型/服务准备好（再空跑一次极短推理，
+    /// 把 ORT 会话初始化、prompt 计算等一次性开销也吃掉），之后每句都只付纯推理时间。
+    /// 约定：实现方不得抛异常（失败返回 false），由界面提示「首次翻译将现场加载」。
+    /// </summary>
+    public interface IWarmupEngine
+    {
+        Task<bool> WarmupAsync(string srcLang, string dstLang);
+    }
+
+    /// <summary>
     /// 桩引擎：不加载任何模型，只如实返回占位文本，用于验证
     /// 「采集 → VAD → 引擎 → 字幕」整条框架链路。
     /// </summary>
@@ -396,7 +409,7 @@ namespace BibooUxTool
     /// Whisper.net ASR 引擎（离线、MIT）：16kHz/mono PCM16 → 源语言文本。
     /// 模型懒加载：首个语音段才 Build WhisperFactory，避免下拉里只显示名字就占用数百 MB 内存。
     /// </summary>
-    public sealed class WhisperAsrEngine : ITranslationEngine
+    public sealed class WhisperAsrEngine : ITranslationEngine, IWarmupEngine
     {
         private readonly string _explicitPath;
         private WhisperFactory _factory;
@@ -486,6 +499,23 @@ namespace BibooUxTool
             // 仅 ASR 引擎：不做 MT，原样返回（UI 字幕原文=译文）。
             return Task.FromResult(text);
         }
+
+        /// <summary>预热：只把 ggml 模型文件读进 WhisperFactory（真正的推理留给实段，避免白跑一次几秒）。</summary>
+        public Task<bool> WarmupAsync(string srcLang, string dstLang)
+        {
+            return Task.Run(() =>
+            {
+                try
+                {
+                    if (!IsModelReady) return false;
+                    return GetFactory() != null;
+                }
+                catch
+                {
+                    return false;
+                }
+            });
+        }
     }
 
     /// <summary>
@@ -534,7 +564,7 @@ namespace BibooUxTool
     /// 组合引擎：Whisper ASR（识别源语言）+ Argos HTTP MT（源→目标）。
     /// Whisper 的 ggml 模型默认多语种，按 src Code 识别；Argos 按 ISO 代码翻译。
     /// </summary>
-    public sealed class WhisperArgosEngine : ITranslationEngine
+    public sealed class WhisperArgosEngine : ITranslationEngine, IWarmupEngine
     {
         private readonly WhisperAsrEngine _asr;
         private readonly ArgosClient _mt;
@@ -560,6 +590,10 @@ namespace BibooUxTool
 
         public Task<string> TranslateTextAsync(string text, string srcLang, string dstLang)
             => _mt.TranslateAsync(text, srcLang, dstLang);
+
+        /// <summary>只预热 Whisper 工厂（Argos 是 HTTP 服务，不在本地加载模型）。</summary>
+        public Task<bool> WarmupAsync(string srcLang, string dstLang)
+            => _asr.WarmupAsync(srcLang, dstLang);
     }
 
     /// <summary>
@@ -569,7 +603,7 @@ namespace BibooUxTool
     /// ⚠ 原生库 sherpa-onnx-c-api.dll / onnxruntime.dll 由 NuGet 运行时包提供，
     ///    net48 不会自动从 runtimes\ 解析 → 见 csproj 的 CopySherpaNative 目标。
     /// </summary>
-    public sealed class SenseVoiceAsrEngine : ITranslationEngine
+    public sealed class SenseVoiceAsrEngine : ITranslationEngine, IWarmupEngine
     {
         private OfflineRecognizer _rec;
         private string _recModelPath;
@@ -669,12 +703,52 @@ namespace BibooUxTool
             // 仅 ASR 引擎：不做 MT，原样返回（UI 字幕原文=译文）。
             return Task.FromResult(text);
         }
+
+        /// <summary>
+        /// 预热：加载 SenseVoice 模型 + 空跑一次极短解码。
+        /// 前者是首次翻译的绝对大头（228MB int8 读盘 + ORT 建会话，本机 ~1.2s）；
+        /// 后者把 ORT 首帧的算子初始化 / 内存池一次性开销也提前吃掉（~60ms，输出丢弃）。
+        /// </summary>
+        public Task<bool> WarmupAsync(string srcLang, string dstLang)
+        {
+            return Task.Run(() =>
+            {
+                try
+                {
+                    if (!IsModelReady)
+                        return false;
+
+                    var rec = GetRecognizer();
+                    if (rec == null)
+                        return false;
+
+                    // 0.3s 合成方波（幅度 2000/32768）——只为跑通一次 decode，结果丢弃
+                    var pcm = new float[4800];
+                    for (int i = 0; i < pcm.Length; i++)
+                        pcm[i] = ((i / 20) % 2 == 0) ? 2000f / 32768f : -2000f / 32768f;
+
+                    lock (_gate)
+                    {
+                        using (var s = rec.CreateStream())
+                        {
+                            s.AcceptWaveform(16000, pcm);
+                            rec.Decode(s);
+                        }
+                    }
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            });
+        }
     }
 
     /// <summary>
     /// 组合引擎：SenseVoice ASR（识别源语言）+ Argos HTTP MT（源→目标）。全链路离线。
     /// </summary>
-    public sealed class SenseVoiceArgosEngine : ITranslationEngine
+    public sealed class SenseVoiceArgosEngine : ITranslationEngine, IWarmupEngine
     {
         private readonly SenseVoiceAsrEngine _asr;
         private readonly ArgosClient _mt;
@@ -700,6 +774,10 @@ namespace BibooUxTool
 
         public Task<string> TranslateTextAsync(string text, string srcLang, string dstLang)
             => _mt.TranslateAsync(text, srcLang, dstLang);
+
+        /// <summary>只预热本机的 SenseVoice；Argos 是 HTTP 服务，探活留给实际翻译（不在本地加载模型）。</summary>
+        public Task<bool> WarmupAsync(string srcLang, string dstLang)
+            => _asr.WarmupAsync(srcLang, dstLang);
     }
 
     /// <summary>
@@ -707,7 +785,7 @@ namespace BibooUxTool
     /// 不需要任何额外 MT 服务/模型（Whisper 原生能力）。限制：译文只能是英语。
     /// 目标语言若不选英语，本引擎仍输出英语（引擎名已注明）。
     /// </summary>
-    public sealed class WhisperDirectTranslateEngine : ITranslationEngine
+    public sealed class WhisperDirectTranslateEngine : ITranslationEngine, IWarmupEngine
     {
         private readonly string _explicitPath;
         private WhisperFactory _factory;
@@ -795,6 +873,23 @@ namespace BibooUxTool
         {
             // 直译已在 TranscribeAsync 完成，这里原样返回
             return Task.FromResult(text);
+        }
+
+        /// <summary>预热：只把 ggml 模型读进 WhisperFactory（真正的推理留给实段）。</summary>
+        public Task<bool> WarmupAsync(string srcLang, string dstLang)
+        {
+            return Task.Run(() =>
+            {
+                try
+                {
+                    if (!IsModelReady) return false;
+                    return GetFactory() != null;
+                }
+                catch
+                {
+                    return false;
+                }
+            });
         }
     }
 

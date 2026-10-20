@@ -2,14 +2,19 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using NAudio.Wave;
 
 namespace BibooUxTool
 {
     /// <summary>
-    /// 实时翻译模块（框架版）：USB Audio 采集 → VAD 分段 → 翻译引擎 → 实时字幕。
+    /// 翻译模块（框架版）：两种工作模式，共用同一条「音频 → 识别 → 翻译 → 字幕」链路。
+    ///   ① 按录音（默认）：点【开始录音】累积 PCM，点【停止并翻译】把整段一次送模型——
+    ///      不依赖 VAD 断句，结果稳定，适合当前阶段。录音同时存成 WAV（exe 同目录 records\）。
+    ///   ② 实时字幕（勾选框）：USB Audio 采集 → VAD 分段 → 逐段送引擎，边说边出字幕。
     /// 当前引擎为桩实现（不加载模型），先把「采集→分段→识别→翻译→字幕」链路与 UI 搭好；
     /// 后续接 Whisper.net（ASR）+ Argos/OPUS-MT（MT）时只换 ITranslationEngine 实现，UI 不动。
     /// 音频源暂用 USB Audio（鼠标当 USB 声卡 / 普通麦克风均走标准 WaveIn），不走 BLE。
@@ -33,6 +38,13 @@ namespace BibooUxTool
         private ComboBox _cmbEngine;
         private ComboBox _cmbModel;
         private Label _lblEngineNote;
+        private Label _lblWarmup;          // 预热状态（进页面即后台加载模型 / 拉起本地服务）
+
+        // ---------- 预热（进入页面就把模型准备好，避免首次翻译干等） ----------
+        private readonly object _warmGate = new object();
+        private ITranslationEngine _warmEngine;   // 已预热/正在预热的引擎
+        private Task<bool> _warmTask;             // 该引擎的预热任务（失败已吞成 false）
+        private bool _shown;                      // 窗口已显示：之后才允许触发预热
 
         // ---------- 实时字幕 ----------
         private ListView _lstSubtitle;
@@ -40,6 +52,7 @@ namespace BibooUxTool
 
         // ---------- 日志 ----------
         private RichTextBox _txtLog;
+        private GradientButton _btnClearLog;      // 清空日志（右上角，与标题同行）
 
         // ---------- pipeline ----------
         private readonly UsbAudioCapture _capture = new UsbAudioCapture();
@@ -47,9 +60,40 @@ namespace BibooUxTool
         private ITranslationEngine _engine;
         private bool _running;
 
+        // ---------- 录音模式（默认）：按下开始 → 累积 PCM → 停止后整段送模型 ----------
+        private CheckBox _chkRealtime;      // 勾上才走旧的「VAD 自动断句实时字幕」
+
+        // ---------- 鼠标语音键（K5）自动录音 ----------
+        // 硬件端在 BLE 模式下按 K5 发 Ctrl+Win 修饰符 + 开麦，松开时先释放修饰符再补一发 Enter。
+        // 这里用 Raw Input 监听这两个时刻：Ctrl+Win → 自动开始录音；Enter → 自动停止 → 翻译 → 朗读。
+        private CheckBox _chkPtt;           // 勾上才启用鼠标语音键自动录音
+        private Label _lblPtt;              // 监听/录音状态行
+        private KeyboardPttWatcher _ptt;
+        private bool _pttRecording;         // 当前这段录音是否由语音键触发（决定 Enter 是否收尾）
+
+        // 译文朗读（TTS：sherpa-onnx Kokoro int8，中 + 英，103 音色）
+        private TtsEngine _tts;
+        private readonly SynchronizationContext _uiCtx;  // 构造时抓 UI 线程上下文，后台线程回调用
+        private bool _ttsWarmStarted;
+        private CheckBox _chkSpeak;          // 勾上才朗读译文
+        private ComboBox _cmbOut;            // 输出设备（NAudio WaveOut）
+        private TextBox _numSid;             // 音色 id（0-102）
+        private bool _sidUserSet;            // 用户是否手动改过音色（改过就不再按语言自动选）
+        private Label _lblTts;               // TTS 状态
+        private GradientButton _btnTestTts;  // 试听一句
+        private Label _lblMode;
+        private readonly object _recGate = new object();
+        private readonly List<byte> _recBuf = new List<byte>();
+        private long _recBytes;             // 已录字节数（16bit/mono → /2/16000 = 秒）
+        private bool _busy;                 // 已停止录音，但整段仍在识别/翻译
+        private float _lastRms;
+        private double _lastRecSec;
+        private double _lastRecUiSec;      // 仅音频回调线程使用：录音时长 UI 刷新节流
+        private const int MaxRecordSeconds = 300;   // 单次录音上限，防内存无限增长
+        private const double MinRecordSeconds = 0.2; // 短于此视为误触，不送模型
+
         /// <summary>语言选项：中文名（Name，列表主行）+ 母语名（Native，列表副行）+ 引擎用 Code（BCP-47 风格）。
-        /// 当前为框架占位列表，后续接 Whisper（ASR，99+ 语言）+ Argos/OPUS-MT（MT，55+ 语言）时按 Code 增删即可，
-        /// 引擎侧按 Code 加载对应模型包。参考竞品「语言设置」页（165 种、可搜索、双语名对照）。</summary>
+        /// 面板可搜索（中文名 / 母语名 / Code 均可命中），双语名对照显示。</summary>
         private sealed class LangItem : IEquatable<LangItem>
         {
             public string Code { get; }
@@ -67,24 +111,27 @@ namespace BibooUxTool
             public override int GetHashCode() => Code.GetHashCode();
         }
 
+        // 严格对齐混元 Hy-MT2 官方支持的 38 种语言：界面里多给一项，翻译时引擎就会拒绝
+        // （日志报「混元翻译不支持目标语种」）。换用支持更多语种的引擎时，按 Code 另建一份表格即可。
         private static readonly LangItem[] LangItems = new[]
         {
             new LangItem("zh",    "中文（简体）", "中文简体"),
             new LangItem("zh-TW", "中文（繁体）", "中文繁體"),
+            new LangItem("yue",   "粤语",       "粵語"),
             new LangItem("en",    "英语",       "English"),
             new LangItem("ja",    "日语",       "日本語"),
             new LangItem("ko",    "韩语",       "한국어"),
             new LangItem("fr",    "法语",       "Français"),
-            new LangItem("es",    "西班牙语",     "Español"),
             new LangItem("de",    "德语",       "Deutsch"),
+            new LangItem("es",    "西班牙语",     "Español"),
             new LangItem("pt",    "葡萄牙语",     "Português"),
             new LangItem("ru",    "俄语",       "Русский"),
             new LangItem("it",    "意大利语",     "Italiano"),
             new LangItem("ar",    "阿拉伯语",     "العربية"),
             new LangItem("th",    "泰语",       "ไทย"),
             new LangItem("vi",    "越南语",      "Tiếng Việt"),
-            new LangItem("id",    "印度尼西亚语",   "Indonesia"),
-            new LangItem("ms",    "马来语",      "Melayu"),
+            new LangItem("id",    "印度尼西亚语",   "Bahasa Indonesia"),
+            new LangItem("ms",    "马来语",      "Bahasa Melayu"),
             new LangItem("tl",    "菲律宾语",     "Filipino"),
             new LangItem("hi",    "印地语",      "हिन्दी"),
             new LangItem("bn",    "孟加拉语",     "বাংলা"),
@@ -93,49 +140,29 @@ namespace BibooUxTool
             new LangItem("tr",    "土耳其语",     "Türkçe"),
             new LangItem("nl",    "荷兰语",      "Nederlands"),
             new LangItem("pl",    "波兰语",      "Polski"),
-            new LangItem("uk",    "乌克兰语",     "Українська"),
             new LangItem("cs",    "捷克语",      "Čeština"),
-            new LangItem("sv",    "瑞典语",      "Svenska"),
-            new LangItem("da",    "丹麦语",      "Dansk"),
-            new LangItem("fi",    "芬兰语",      "Suomi"),
-            new LangItem("no",    "挪威语",      "Norsk"),
-            new LangItem("el",    "希腊语",      "Ελληνικά"),
+            new LangItem("uk",    "乌克兰语",     "Українська"),
             new LangItem("he",    "希伯来语",     "עברית"),
-            new LangItem("hu",    "匈牙利语",     "Magyar"),
-            new LangItem("ro",    "罗马尼亚语",    "Română"),
-            new LangItem("bg",    "保加利亚语",    "Български"),
-            new LangItem("hr",    "克罗地亚语",    "Hrvatski"),
-            new LangItem("sr",    "塞尔维亚语",    "Српски"),
-            new LangItem("sk",    "斯洛伐克语",    "Slovenčina"),
-            new LangItem("sl",    "斯洛文尼亚语",   "Slovenščina"),
-            new LangItem("lt",    "立陶宛语",     "Lietuvių"),
-            new LangItem("lv",    "拉脱维亚语",    "Latviešu"),
-            new LangItem("et",    "爱沙尼亚语",    "Eesti"),
-            new LangItem("ca",    "加泰罗尼亚语",   "Català"),
-            new LangItem("eu",    "巴斯克语",     "Euskara"),
-            new LangItem("gl",    "加利西亚语",    "Galego"),
-            new LangItem("cy",    "威尔士语",     "Cymraeg"),
-            new LangItem("sw",    "斯瓦希里语",    "Kiswahili"),
-            new LangItem("am",    "阿姆哈拉语",    "አማርኛ"),
-            new LangItem("ne",    "尼泊尔语",     "नेपाली"),
-            new LangItem("si",    "僧伽罗语",     "සිංහල"),
-            new LangItem("km",    "高棉语",      "ខ្មែរ"),
-            new LangItem("lo",    "老挝语",      "ລາວ"),
-            new LangItem("my",    "缅甸语",      "မြန်မာ"),
-            new LangItem("ka",    "格鲁吉亚语",    "ქართული"),
-            new LangItem("az",    "阿塞拜疆语",    "Azərbaycan"),
-            new LangItem("kk",    "哈萨克语",     "Қазақ"),
-            new LangItem("uz",    "乌兹别克语",    "Oʻzbek"),
-            new LangItem("mn",    "蒙古语",      "Монгол"),
             new LangItem("ta",    "泰米尔语",     "தமிழ்"),
             new LangItem("te",    "泰卢固语",     "తెలుగు"),
-            new LangItem("ml",    "马拉雅拉姆语",   "മലയാളം"),
-            new LangItem("kn",    "卡纳达语",     "ಕನ್ನಡ"),
             new LangItem("mr",    "马拉地语",     "मराठी"),
-            new LangItem("pa",    "旁遮普语",     "ਪੰਜਾਬੀ"),
-            new LangItem("af",    "南非荷兰语",    "Afrikaans"),
-            new LangItem("is",    "冰岛语",      "Íslenska"),
+            new LangItem("gu",    "古吉拉特语",    "ગુજરાતી"),
+            new LangItem("km",    "高棉语",      "ខ្មែរ"),
+            new LangItem("my",    "缅甸语",      "မြန်မာ"),
+            new LangItem("bo",    "藏语",       "བོད་སྐད"),
+            new LangItem("kk",    "哈萨克语",     "Қазақ"),
+            new LangItem("mn",    "蒙古语",      "Монгол"),
+            new LangItem("ug",    "维吾尔语",     "ئۇيغۇرچە"),
         };
+
+        /// <summary>按 Code 取语言项（大小写不敏感）；找不到返回 null。默认语言用它定位，避免改表顺序后索引错位。</summary>
+        private static LangItem FindLang(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return null;
+            foreach (var it in LangItems)
+                if (string.Equals(it.Code, code, StringComparison.OrdinalIgnoreCase)) return it;
+            return null;
+        }
 
         // 段队列 + 单消费泵：WaveIn 回调线程只入队，处理在后台线程串行执行，
         // 避免高语速时多段并发打进引擎（也避免 UI 线程被阻塞）。
@@ -150,19 +177,46 @@ namespace BibooUxTool
         private long _lastCostMs;
         private double _avgCostMs;
 
-        /// <summary>内容列卡片（宽度由 LayoutContent 统一管理：限宽 + 居中）。</summary>
+        /// <summary>内容列卡片（位置与尺寸由 LayoutContent 统一管理：随窗口宽高自适应）。</summary>
         private readonly List<RoundedPanel> _contentCards = new List<RoundedPanel>();
+
+        // 四张卡片的直接引用：LayoutContent 需要按顺序做纵向重排（字幕区/日志区吸收多余高度）
+        private RoundedPanel _cardAudio;
+        private RoundedPanel _cardEngine;
+        private RoundedPanel _cardSub;
+        private RoundedPanel _cardLog;
+
+        // 布局常量：卡片外边距与纵向间隙
+        private const int CardMargin = 12;
+        private const int CardGap = 12;
+        private const int AudioCardHeight = 204;   // 176（原「朗读译文」行）+ 28（鼠标语音键自动录音行）
+
+        /// <summary>暂时屏蔽引擎卡里的两行说明（用户红框圈出的「预热状态」+「引擎推荐说明」）。
+        /// 改回 true 即两行恢复显示，引擎卡高度也会自动还原，无需再改别处。</summary>
+        private static readonly bool ShowEngineHints = false;
+
+        /// <summary>引擎/模型两个下拉是否显示。false = 界面上不暴露，但**引擎选型逻辑照常执行**
+        /// （PopulateEngines / RefreshModels 仍按 TranslationConfig 落到「SenseVoice + 混元 Hy-MT2」），
+        /// 用户看不到也改不了，等于锁定默认配置。改回 true 即恢复下拉，卡片高度自动还原。</summary>
+        private static readonly bool ShowEngineSelectors = false;
+
+        /// <summary>引擎卡高度按可见行数累加：标题+语言行 74、引擎行 +30、说明两行 +62。
+        /// 当前（两个开关都关）74；只开下拉 104；全开 166。</summary>
+        private static readonly int EngineCardHeight =
+            74 + (ShowEngineSelectors ? 30 : 0) + (ShowEngineHints ? 62 : 0);
 
         /// <summary>内容列设计宽度（比设计基准略宽：字幕表需要横向空间）。</summary>
         private const int ContentDesignWidth = 780;
 
         public TranslatorForm()
         {
+            _uiCtx = SynchronizationContext.Current;   // 后台线程回调要靠它切回 UI
             BuildUi();
             RefreshDevices();
             PopulateEngines();
             RefreshModels();
-            LogLine("实时翻译框架就绪：选音频输入设备 →【开始采集】，对麦克风说话即可。",
+            LogLine("翻译模块就绪（当前为「按录音」模式）：选音频输入设备 →【开始录音】，"
+                  + "说完点【停止并翻译】，整段 PCM 一次送模型；想边说边出字幕就勾上「实时字幕」。",
                 UiTheme.TextSub);
             LogLine("引擎下拉含：桩（仅验证链路）/ SenseVoice+混元 Hy-MT2（33 语种）/ SenseVoice+OPUS-MT（中↔英）/ "
                   + "SenseVoice ASR / Whisper ASR / Whisper 直译→英语 / Whisper+Argos。", UiTheme.TextSub);
@@ -178,6 +232,8 @@ namespace BibooUxTool
             _vad.SegmentReady -= OnSegmentReady;
             _vad.LevelUpdated -= OnLevelUpdated;
             _capture.Dispose();
+            if (_tts != null) { _tts.Stop(); _tts.Dispose(); _tts = null; }
+            if (_ptt != null) { _ptt.Dispose(); _ptt = null; }
             // 关窗口时收掉我们自己拉起的 llama-server（只杀本进程启动的那个，用户手起的不动）
             LlmServerLauncher.Stop();
             base.OnFormClosed(e);
@@ -196,8 +252,9 @@ namespace BibooUxTool
 
             // 卡1：音频输入
             var cardAudio = new RoundedPanel();
-            cardAudio.SetBounds(12, 12, ContentDesignWidth - 24, 148);
-            cardAudio.Anchor = AnchorStyles.Top;
+            _cardAudio = cardAudio;
+            cardAudio.SetBounds(12, 12, ContentDesignWidth - 24, AudioCardHeight);
+            cardAudio.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             cardAudio.Controls.Add(MakeTitle("音频输入（USB Audio / 麦克风）"));
 
             var lblDev = new Label();
@@ -223,7 +280,7 @@ namespace BibooUxTool
             _btnStart.SetBounds(524, 32, 104, 26);
             _btnStart.Text = "开始采集";
             _btnStart.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _btnStart.Click += OnStart;
+            _btnStart.Click += delegate { _pttRecording = false; OnStart(_btnStart, EventArgs.Empty); };
 
             _btnStop = new GradientButton();
             _btnStop.SetBounds(636, 32, 104, 26);
@@ -248,35 +305,113 @@ namespace BibooUxTool
             lblLv.TextAlign = ContentAlignment.MiddleLeft;
 
             _barLevel = new ProgressBar();
-            _barLevel.SetBounds(56, 102, 560, 20);
+            _barLevel.SetBounds(56, 102, 480, 20);
             _barLevel.Minimum = 0;
             _barLevel.Maximum = 100;
             _barLevel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             _lblLevel = new Label();
-            _lblLevel.SetBounds(628, 100, 112, 22);
+            _lblLevel.SetBounds(548, 100, 192, 22);
             _lblLevel.ForeColor = UiTheme.TextSub;
             _lblLevel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             _lblLevel.Text = "RMS 0.000";
             _lblLevel.TextAlign = ContentAlignment.MiddleLeft;
 
-            var lblVad = new Label();
-            lblVad.Text = "VAD：静音 600ms 断句 / 最短语音 250ms / 最长段 8s（参数见 TranslatorCore.SimpleVad）";
-            lblVad.ForeColor = UiTheme.TextSub;
-            lblVad.SetBounds(16, 124, ContentDesignWidth - 56, 18);
-            lblVad.AutoSize = false;
-            lblVad.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            lblVad.TextAlign = ContentAlignment.MiddleLeft;
+            _chkRealtime = new CheckBox();
+            _chkRealtime.Text = "实时字幕（VAD 自动断句）";
+            _chkRealtime.ForeColor = UiTheme.TextSub;
+            _chkRealtime.SetBounds(16, 124, 184, 18);
+            _chkRealtime.Checked = false;                 // 默认「按录音」模式
+            _chkRealtime.CheckedChanged += delegate { UpdateModeUi(); UpdateButtons(); };
+
+            // 朗读译文（TTS）：Kokoro int8 中英双语，103 音色；句内串行，新句子会打断上一句
+            _chkSpeak = new CheckBox();
+            _chkSpeak.Text = "朗读译文";
+            _chkSpeak.ForeColor = UiTheme.TextSub;
+            _chkSpeak.SetBounds(16, 148, 86, 18);
+            _chkSpeak.Checked = true;          // 进入卡片默认勾选「朗读译文」（默认就出声）
+            _chkSpeak.CheckedChanged += delegate
+            {
+                if (_chkSpeak.Checked)
+                    StartTtsWarmup();          // 勾上才真正加载，省内存
+                UpdateTtsStatus();
+            };
+
+            var lblSid = new Label();
+            lblSid.Text = "音色";
+            lblSid.ForeColor = UiTheme.TextSub;
+            lblSid.SetBounds(112, 148, 28, 20);
+            lblSid.TextAlign = ContentAlignment.MiddleLeft;
+
+            _numSid = new TextBox();
+            _numSid.SetBounds(142, 146, 40, 22);
+            _numSid.Text = TtsEngine.DefaultSpeakerId.ToString();
+            _numSid.TextAlign = HorizontalAlignment.Center;
+            _numSid.BackColor = UiTheme.InputBg;
+            _numSid.ForeColor = UiTheme.TextMain;
+            _numSid.TextChanged += delegate { _sidUserSet = true; };
+
+            var lblOut = new Label();
+            lblOut.Text = "输出";
+            lblOut.ForeColor = UiTheme.TextSub;
+            lblOut.SetBounds(196, 148, 30, 20);
+            lblOut.TextAlign = ContentAlignment.MiddleLeft;
+
+            _cmbOut = new ComboBox();
+            _cmbOut.SetBounds(230, 144, 200, 22);
+            _cmbOut.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cmbOut.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
+            _btnTestTts = new GradientButton();
+            _btnTestTts.SetBounds(636, 142, 104, 26);
+            _btnTestTts.Text = "试听一句";
+            _btnTestTts.IsPrimary = false;
+            _btnTestTts.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnTestTts.Click += OnTestTts;
+
+            _lblTts = new Label();
+            _lblTts.SetBounds(440, 148, 180, 20);
+            _lblTts.ForeColor = UiTheme.TextSub;
+            _lblTts.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _lblTts.TextAlign = ContentAlignment.MiddleRight;
+            _lblTts.Text = "○ 未启用";
+
+            _lblMode = new Label();
+            _lblMode.ForeColor = UiTheme.TextSub;
+            _lblMode.SetBounds(206, 124, ContentDesignWidth - 238, 18);
+            _lblMode.AutoSize = false;
+            _lblMode.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _lblMode.TextAlign = ContentAlignment.MiddleLeft;
+
+            // 鼠标语音键自动录音：勾上后由 Raw Input 监听（Ctrl+Win 开始 / Enter 结束），
+            // 不要求本窗口在前台——用户可以在微信/游戏里直接按 K5 说话。
+            _chkPtt = new CheckBox();
+            _chkPtt.Text = "鼠标语音键自动录音";
+            _chkPtt.ForeColor = UiTheme.TextSub;
+            _chkPtt.SetBounds(16, 174, 168, 18);
+            _chkPtt.Checked = true;
+            _chkPtt.CheckedChanged += delegate { OnPttToggleChanged(); };
+
+            _lblPtt = new Label();
+            _lblPtt.ForeColor = UiTheme.TextSub;
+            _lblPtt.SetBounds(190, 174, ContentDesignWidth - 222, 18);
+            _lblPtt.AutoSize = false;
+            _lblPtt.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _lblPtt.TextAlign = ContentAlignment.MiddleLeft;
+            _lblPtt.Text = "○ 等待启动";
 
             cardAudio.Controls.AddRange(new Control[] {
                 lblDev, _cmbDevice, _btnRefreshDev, _btnStart, _btnStop,
-                lblFmt, lblLv, _barLevel, _lblLevel, lblVad });
+                lblFmt, lblLv, _barLevel, _lblLevel, _chkRealtime, _lblMode,
+                _chkSpeak, lblSid, _numSid, lblOut, _cmbOut, _btnTestTts, _lblTts,
+                _chkPtt, _lblPtt });
             _contentCards.Add(cardAudio);
 
             // 卡2：翻译引擎
             var cardEngine = new RoundedPanel();
-            cardEngine.SetBounds(12, 172, ContentDesignWidth - 24, 140);
-            cardEngine.Anchor = AnchorStyles.Top;
+            _cardEngine = cardEngine;
+            cardEngine.SetBounds(12, 172, ContentDesignWidth - 24, EngineCardHeight);
+            cardEngine.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             cardEngine.Controls.Add(MakeTitle("翻译引擎（源/目标语言可搜索选择，后续接 Whisper.net + Argos）"));
 
             var lblSrc = new Label();
@@ -285,8 +420,8 @@ namespace BibooUxTool
             lblSrc.SetBounds(16, 38, 48, 22);
             lblSrc.TextAlign = ContentAlignment.MiddleLeft;
 
-            _srcLang = LangItems[0];   // 默认 中文（简体, zh）
-            _dstLang = LangItems[2];   // 默认 英语(en)
+            _srcLang = FindLang("zh") ?? LangItems[0];    // 默认源语言：中文（简体）
+            _dstLang = FindLang("en") ?? LangItems[1];    // 默认目标语言：英语
 
             _btnSrcLang = new GradientButton();
             _btnSrcLang.SetBounds(68, 34, 150, 26);
@@ -339,24 +474,50 @@ namespace BibooUxTool
             _cmbModel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _cmbModel.SelectedIndexChanged += OnModelChanged;
 
+            // 引擎/模型行：默认不显示（ShowEngineSelectors=false）。控件仍然创建并完成初始化，
+            // 所以 _cmbEngine.SelectedIndex / _cmbModel.SelectedIndex 照常驱动 _engine 与模型路径，
+            // 只是用户看不到；隐藏的 ComboBox 设 SelectedIndex 依旧会走 OnEngineChanged/OnModelChanged。
+            lblEng.Visible = ShowEngineSelectors;
+            _cmbEngine.Visible = ShowEngineSelectors;
+            lblModel.Visible = ShowEngineSelectors;
+            _cmbModel.Visible = ShowEngineSelectors;
+
+            // 说明两行的纵向起点：引擎行隐藏时上移填满空位（与 EngineCardHeight 的分段高度一致）
+            int hintsY = ShowEngineSelectors ? 102 : 68;
+
             _lblEngineNote = new Label();
             _lblEngineNote.Text = "推荐「SenseVoice + 离线翻译」：识别 + 中↔英翻译全在本机跑，不联网、不需要本地服务（单句译文 0.2~0.4s）。"
                                + "语言面板支持按中文名 / 母语名 / 代码搜索（如输入「ri」「日本語」「ja」均可命中日语）。";
             _lblEngineNote.ForeColor = UiTheme.TextSub;
-            _lblEngineNote.SetBounds(16, 104, ContentDesignWidth - 56, 32);
+            _lblEngineNote.SetBounds(16, hintsY + 24, ContentDesignWidth - 56, 32);
             _lblEngineNote.AutoSize = false;
             _lblEngineNote.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblEngineNote.TextAlign = ContentAlignment.TopLeft;
 
+            // 预热状态行：进入页面就在后台加载模型 / 拉起本地服务，把首次翻译的等待挪到这里
+            _lblWarmup = new Label();
+            _lblWarmup.Text = "○ 预热未开始";
+            _lblWarmup.ForeColor = UiTheme.TextSub;
+            _lblWarmup.SetBounds(16, hintsY, ContentDesignWidth - 56, 20);
+            _lblWarmup.AutoSize = false;
+            _lblWarmup.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _lblWarmup.TextAlign = ContentAlignment.MiddleLeft;
+
+            // 暂时屏蔽用户红框圈出的两行说明（预热状态 + 引擎推荐）；
+            // ShowEngineHints 改回 true 即恢复，卡片高度会一起还原（见 EngineCardHeight）。
+            _lblWarmup.Visible = ShowEngineHints;
+            _lblEngineNote.Visible = ShowEngineHints;
+
             cardEngine.Controls.AddRange(new Control[] {
                 lblSrc, _btnSrcLang, _btnSwap, lblDst, _btnDstLang,
-                lblEng, _cmbEngine, lblModel, _cmbModel, _lblEngineNote });
+                lblEng, _cmbEngine, lblModel, _cmbModel, _lblWarmup, _lblEngineNote });
             _contentCards.Add(cardEngine);
 
-            // 卡3：实时字幕
+            // 卡3：实时字幕（高度在 LayoutContent 中按剩余空间动态分配）
             var cardSub = new RoundedPanel();
+            _cardSub = cardSub;
             cardSub.SetBounds(12, 324, ContentDesignWidth - 24, 216);
-            cardSub.Anchor = AnchorStyles.Top;
+            cardSub.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             cardSub.Controls.Add(MakeTitle("实时字幕"));
 
             _lstSubtitle = new ListView();
@@ -383,10 +544,11 @@ namespace BibooUxTool
             cardSub.Controls.AddRange(new Control[] { _lstSubtitle, _lblStats });
             _contentCards.Add(cardSub);
 
-            // 卡4：日志（唯一四边锚定卡片：窗口拉高时吸收多余高度）
+            // 卡4：日志（高度在 LayoutContent 中按剩余空间动态分配）
             var cardLog = new RoundedPanel();
+            _cardLog = cardLog;
             cardLog.SetBounds(12, 552, ContentDesignWidth - 24, 164);
-            cardLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom;
+            cardLog.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             cardLog.Controls.Add(MakeTitle("日志"));
 
             _txtLog = new RichTextBox();
@@ -399,11 +561,26 @@ namespace BibooUxTool
             _txtLog.Font = new Font("Consolas", 9f);
             _txtLog.DetectUrls = false;
 
+            // 清空日志：放标题行右侧（右锚定），样式与「蓝牙连接」页日志卡那颗一致
+            _btnClearLog = new GradientButton();
+            _btnClearLog.SetBounds(ContentDesignWidth - 24 - 16 - 96, 6, 96, 22);
+            _btnClearLog.Text = "清空日志";
+            _btnClearLog.IsPrimary = false;
+            _btnClearLog.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnClearLog.Click += OnClearLog;
+
             cardLog.Controls.Add(_txtLog);
+            cardLog.Controls.Add(_btnClearLog);
+            // ⚠ 本工程 RoundedPanel 的 z-order：Controls 索引 0 = 最上层，Add 追加到末尾 = 最底层。
+            // 标题标签（14,8,宽 ContentDesignWidth-60）会盖住按钮左大半，只剩右边缘 6px 露出来
+            // → 必须显式提到索引 0，否则界面上只看到一道细弧、而且点不到。
+            cardLog.Controls.SetChildIndex(_btnClearLog, 0);
             _contentCards.Add(cardLog);
 
             Controls.AddRange(new Control[] { cardAudio, cardEngine, cardSub, cardLog });
 
+            LayoutContent();          // 按当前 ClientSize 归一化一次，避免首帧仍用设计坐标
+            UpdateModeUi();
             UpdateButtons();
         }
 
@@ -416,20 +593,70 @@ namespace BibooUxTool
             l.ForeColor = UiTheme.TextMain;
             l.TextAlign = ContentAlignment.MiddleLeft;
             l.AutoSize = false;
+            l.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             return l;
         }
 
-        /// <summary>内容列居中：宽于设计宽度时限宽居中，窄于设计宽度时等比收窄。</summary>
+        /// <summary>
+        /// 内容列自适应：宽度铺满可用区（不再限制 ContentDesignWidth 上限——旧版限宽会让
+        /// 最大化后卡片仍停在 756px，右侧大片留白），高度上把多余空间分给「实时字幕」与「日志」两卡。
+        /// 卡片内部的控件靠锚点（Left|Right / Top|Bottom）跟随伸展，无需逐个重排。
+        /// </summary>
         private void LayoutContent()
         {
-            const int margin = 12;
-            int avail = ClientSize.Width - margin * 2;
-            if (avail < 240)
-                avail = 240;
-            int w = Math.Min(ContentDesignWidth - 24, avail);
-            int x = (ClientSize.Width - w) / 2;
-            foreach (var card in _contentCards)
-                card.SetBounds(x, card.Top, w, card.Height);
+            int availW = ClientSize.Width - CardMargin * 2;
+            if (availW < 240)
+                availW = 240;
+
+            int y = CardMargin;
+
+            if (_cardAudio != null)
+            {
+                _cardAudio.SetBounds(CardMargin, y, availW, AudioCardHeight);
+                y += AudioCardHeight + CardGap;
+            }
+            if (_cardEngine != null)
+            {
+                _cardEngine.SetBounds(CardMargin, y, availW, EngineCardHeight);
+                y += EngineCardHeight + CardGap;
+            }
+
+            // 剩余高度：字幕区 + 日志区。二者按比例分配，字幕区略多（主要视线区）。
+            int rest = ClientSize.Height - y - CardMargin;
+            const int MinRest = 200;
+            if (rest < MinRest)
+                rest = MinRest;
+
+            int subH = (int)Math.Round(rest * 0.58);
+            if (subH < 140)
+                subH = 140;
+            int logH = rest - subH - CardGap;
+            if (logH < 100)
+                logH = 100;
+
+            if (_cardSub != null)
+                _cardSub.SetBounds(CardMargin, y, availW, subH);
+            if (_cardLog != null)
+                _cardLog.SetBounds(CardMargin, y + subH + CardGap, availW, logH);
+
+            LayoutSubtitleColumns(availW);
+        }
+
+        /// <summary>字幕表列宽随卡片宽度等比分配：时间列定宽，原文/译文按 45:55（译文通常更长）。</summary>
+        private void LayoutSubtitleColumns(int cardWidth)
+        {
+            if (_lstSubtitle == null || _lstSubtitle.Columns.Count < 3)
+                return;
+            const int timeW = 90;
+            int inner = cardWidth - 32 - 4;           // 卡片左右内边距 + ListView 边框
+            if (inner < timeW + 120)
+                inner = timeW + 120;
+            int remain = inner - timeW;
+            int srcW = (int)Math.Round(remain * 0.45);
+            int dstW = remain - srcW;
+            _lstSubtitle.Columns[0].Width = timeW;
+            _lstSubtitle.Columns[1].Width = srcW;
+            _lstSubtitle.Columns[2].Width = dstW;
         }
 
         protected override void OnResize(EventArgs e)
@@ -450,6 +677,28 @@ namespace BibooUxTool
                 _cmbDevice.SelectedIndex = 0;
             else
                 LogLine("未发现任何录音设备（USB Audio 设备是否已插好/装好驱动）。", UiTheme.Warn);
+
+            // 输出设备（TTS 朗读用，NAudio WaveOut）
+            if (_cmbOut == null)
+                return;
+            try
+            {
+                _cmbOut.Items.Clear();
+                for (int i = 0; i < WaveOut.DeviceCount; i++)
+                {
+                    var cap = WaveOut.GetCapabilities(i);
+                    _cmbOut.Items.Add(i + " · " + cap.ProductName);
+                }
+                if (_cmbOut.Items.Count > 0)
+                    _cmbOut.SelectedIndex = 0;
+                else
+                    LogLine("未发现音频输出设备，TTS 朗读将不可用。", UiTheme.Warn);
+            }
+            catch (Exception ex)
+            {
+                LogLine("枚举输出设备失败：" + ex.Message, UiTheme.Warn);
+            }
+            UpdateTtsStatus();
         }
 
         private void PopulateEngines()
@@ -582,6 +831,9 @@ namespace BibooUxTool
                     LogLine("⚠ " + eng.DisplayName + " 缺少模型文件。", UiTheme.Danger);
                 LogLine("提示：Whisper 直译把语音直接译成【英语】（目标语言固定英语，无需本地服务）。", UiTheme.TextSub);
             }
+
+            // 换了引擎就重新预热（不同引擎加载不同模型；同一引擎已预热过则秒返回）
+            StartWarmup();
         }
 
         /// <summary>下拉里模型项 = 文件名 + 速度提示；取真实路径时用 ModelFileOf 去掉提示后缀。</summary>
@@ -610,6 +862,23 @@ namespace BibooUxTool
             return e is WhisperAsrEngine || e is WhisperDirectTranslateEngine || e is WhisperArgosEngine;
         }
 
+        /// <summary>在下拉项里按文件名定位当前配置的模型（大小写不敏感）：保证「模型」默认落到
+        /// TranslationConfig 里配置的那个文件，而不是磁盘实际大小写与配置不一致时误选第一项。
+        /// 找不到就回退第 0 项（占位提示行也在 0）。</summary>
+        private static int FindItemIndex(ComboBox.ObjectCollection items, string fileName)
+        {
+            if (!string.IsNullOrEmpty(fileName))
+            {
+                for (int k = 0; k < items.Count; k++)
+                {
+                    var s = items[k] as string;
+                    if (s != null && string.Equals(s, fileName, StringComparison.OrdinalIgnoreCase))
+                        return k;
+                }
+            }
+            return 0;
+        }
+
         /// <summary>「模型」下拉随所选引擎变化：
         /// Whisper* → 列 Models\ggml*.bin，可在界面里切换 tiny/base/small；
         /// SenseVoice* → 显示实际在用的小模型（下拉禁用，仅作提示，免得看到 ggml-base.bin 误以为在用 Whisper）；
@@ -635,8 +904,7 @@ namespace BibooUxTool
                     }
                     if (_cmbModel.Items.Count == 0)
                         _cmbModel.Items.Add("（Models 目录下无 ggml*.bin）");
-                    var idx = _cmbModel.Items.IndexOf(ModelLabel(current));
-                    _cmbModel.SelectedIndex = idx >= 0 ? idx : 0;
+                    _cmbModel.SelectedIndex = FindItemIndex(_cmbModel.Items, ModelLabel(current));
                 }
                 else if (_engine is SenseVoiceHyMtEngine)
                 {
@@ -653,8 +921,7 @@ namespace BibooUxTool
                     }
                     if (_cmbModel.Items.Count == 0)
                         _cmbModel.Items.Add("（Models\\llm 目录下无 *.gguf）");
-                    var idx = _cmbModel.Items.IndexOf(cur);
-                    _cmbModel.SelectedIndex = idx >= 0 ? idx : 0;
+                    _cmbModel.SelectedIndex = FindItemIndex(_cmbModel.Items, cur);
                 }
                 else if (_engine is SenseVoiceMtEngine)
                 {
@@ -730,7 +997,24 @@ namespace BibooUxTool
             if (keep >= 0 && keep < _cmbEngine.Items.Count)
                 _cmbEngine.SelectedIndex = keep;
 
-            LogLine("已切换模型：" + name + "（下次【开始采集】生效）", UiTheme.TextSub);
+            LogLine("已切换模型：" + name + "（下次【开始录音】生效）", UiTheme.TextSub);
+        }
+
+        /// <summary>true = 旧的实时链路（VAD 自动断句）；false = 按录音（停止后整段送模型，默认）。</summary>
+        private bool IsRealtime()
+        {
+            return _chkRealtime != null && _chkRealtime.Checked;
+        }
+
+        /// <summary>模式说明文案随「实时字幕」复选框切换。</summary>
+        private void UpdateModeUi()
+        {
+            if (IsDisposed || _lblMode == null)
+                return;
+            _lblMode.Text = IsRealtime()
+                ? "VAD：静音 600ms 断句 / 最短语音 250ms / 最长段 8s（参数见 TranslatorCore.SimpleVad）"
+                : "按录音：点【开始录音】说话，点【停止并翻译】把整段 PCM 一次送模型（上限 "
+                  + MaxRecordSeconds + "s，录音自动存 exe 同目录 records\\）";
         }
 
         private void UpdateButtons()
@@ -738,10 +1022,235 @@ namespace BibooUxTool
             if (IsDisposed)
                 return;
             bool hasDevice = _cmbDevice.SelectedItem is AudioInputDevice;
-            _btnStart.Enabled = !_running && hasDevice;
-            _btnStop.Enabled = _running;
-            _cmbDevice.Enabled = !_running;
-            _btnRefreshDev.Enabled = !_running;
+            bool rt = IsRealtime();
+            _btnStart.Text = rt ? "开始采集" : "开始录音";
+            _btnStop.Text = rt ? "停止采集" : "停止并翻译";
+            _btnStart.Enabled = !_running && !_busy && hasDevice;
+            _btnStop.Enabled = _running && !_busy;
+            _cmbDevice.Enabled = !_running && !_busy;
+            _btnRefreshDev.Enabled = !_running && !_busy;
+            if (_chkRealtime != null)
+                _chkRealtime.Enabled = !_running && !_busy;
+            UpdatePttUi();
+        }
+
+        // ---------- 鼠标语音键（K5：Ctrl+Win 开始 / Enter 结束） ----------
+
+        /// <summary>窗体消息分流：Raw Input 的 WM_INPUT 交给监听器，其余照常处理。</summary>
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == KeyboardPttWatcher.WM_INPUT && _ptt != null)
+                _ptt.ProcessMessage(m.LParam);
+            base.WndProc(ref m);
+        }
+
+        /// <summary>进入页面后挂上 Raw Input 监听。窗口不在前台也能收到按键（RIDEV_INPUTSINK）。</summary>
+        private void InitPttWatcher()
+        {
+            if (_ptt != null || IsDisposed || !IsHandleCreated)
+                return;
+
+            _ptt = new KeyboardPttWatcher(Handle);
+            _ptt.Enabled = _chkPtt == null || _chkPtt.Checked;
+            _ptt.Pressed += OnPttPressed;
+            _ptt.Released += OnPttReleased;
+
+            if (_ptt.IsRegistered)
+            {
+                LogLine("自动录音已就绪：按鼠标语音键（BLE 模式）Ctrl+Win 开始，松开 Enter 结束并翻译朗读。"
+                      + "本窗口不在前台也有效。", UiTheme.TextSub);
+            }
+            else
+            {
+                LogLine("⚠ 自动录音不可用：Raw Input 注册失败（" + _ptt.LastError + "）。"
+                      + "仍可用【开始录音】按钮手动录音。", UiTheme.Warn);
+            }
+            UpdatePttUi();
+        }
+
+        private void OnPttToggleChanged()
+        {
+            if (_ptt != null)
+                _ptt.Enabled = _chkPtt != null && _chkPtt.Checked;
+
+            // 取消勾选时如果正由语音键录音，先把这一段收尾（停止 → 翻译），
+            // 否则监听被禁用后 Enter 收不到，只能等 300s 上限。
+            if (_chkPtt != null && !_chkPtt.Checked && _pttRecording)
+                HandlePttReleased();
+
+            UpdatePttUi();
+        }
+
+        /// <summary>Raw Input 事件在 UI 线程的 WndProc 里触发；延后一拍执行，避免在消息处理中重入采集。</summary>
+        private void OnPttPressed()
+        {
+            if (IsDisposed)
+                return;
+            try { BeginInvoke(new Action(HandlePttPressed)); }
+            catch { /* 窗口关闭竞态 */ }
+        }
+
+        private void OnPttReleased()
+        {
+            if (IsDisposed)
+                return;
+            try { BeginInvoke(new Action(HandlePttReleased)); }
+            catch { /* 窗口关闭竞态 */ }
+        }
+
+        /// <summary>Ctrl+Win：自动开始一段录音（等同于点【开始录音】）。</summary>
+        private void HandlePttPressed()
+        {
+            if (IsDisposed || _chkPtt == null || !_chkPtt.Checked)
+                return;
+
+            if (_running)
+            {
+                LogLine("自动录音：已在录音中，忽略本次 Ctrl+Win。", UiTheme.Warn);
+                return;
+            }
+            if (_busy)
+            {
+                LogLine("自动录音：上一段还在识别/翻译，本次未开始（说完再按一次 K5 即可）。", UiTheme.Warn);
+                return;
+            }
+
+            var dev = ResolvePttDevice();
+            if (dev == null)
+            {
+                LogLine("自动录音：没有可用的录音设备（dongle 的 USB Audio 是否已插好/装好驱动）。", UiTheme.Warn);
+                return;
+            }
+
+            // 先掐掉正在朗读的上一句：否则麦克风会把 TTS 的声音录进去。
+            if (_tts != null)
+                _tts.Stop();
+
+            _pttRecording = true;
+            OnStart(this, EventArgs.Empty);
+
+            string device = _ptt != null && !string.IsNullOrEmpty(_ptt.LastDeviceName)
+                ? " · " + ShortDevicePath(_ptt.LastDeviceName)
+                : string.Empty;
+            LogLine("自动录音：Win+Ctrl → 开始（" + dev.Name + device + "）", UiTheme.Success);
+            UpdatePttUi();
+        }
+
+        /// <summary>修饰符释放后的 Enter：自动停止 → 整段识别翻译 → 朗读译文（沿用现有链路）。</summary>
+        private void HandlePttReleased()
+        {
+            if (!_pttRecording)
+                return;
+            _pttRecording = false;
+
+            if (_running)
+            {
+                LogLine("自动录音：Enter → 停止并翻译。", UiTheme.Success);
+                OnStop(this, EventArgs.Empty);
+            }
+            UpdatePttUi();
+        }
+
+        /// <summary>
+        /// 语音键录音时优先用 dongle 的 USB Audio（名字里带 Dongle / BLE Remote / KMA；
+        /// 固件现用产品名「Biboo OS Audio Dongle」，命中的是 "Dongle"）。
+        /// 下拉框选中别的麦克风也没关系：这里会临时切到 dongle 声卡，保证录到的是鼠标麦克风。
+        /// </summary>
+        private AudioInputDevice ResolvePttDevice()
+        {
+            var current = _cmbDevice != null ? _cmbDevice.SelectedItem as AudioInputDevice : null;
+            if (current != null && IsDongleAudioName(current.Name))
+                return current;
+
+            if (_cmbDevice == null || _cmbDevice.Items.Count == 0)
+            {
+                RefreshDevices();
+                if (_cmbDevice == null || _cmbDevice.Items.Count == 0)
+                    return null;
+                current = _cmbDevice.SelectedItem as AudioInputDevice;
+            }
+
+            for (int i = 0; i < _cmbDevice.Items.Count; i++)
+            {
+                var it = _cmbDevice.Items[i] as AudioInputDevice;
+                if (it != null && IsDongleAudioName(it.Name))
+                {
+                    _cmbDevice.SelectedIndex = i;
+                    LogLine("自动录音：输入设备切换到 " + it.Name, UiTheme.TextSub);
+                    return it;
+                }
+            }
+
+            // 没有 dongle 声卡（比如用普通麦克风测试）：沿用用户当前选择。
+            return current;
+        }
+
+        private static bool IsDongleAudioName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return false;
+            string n = name.ToLowerInvariant();
+            // "biboo os" 是兜底：WinMM 的 szPname 只有 32 字节，多设备时 Windows 会加
+            // "(2- " 前缀，新名「麦克风 (2- Biboo OS Audio Dongle)」正好顶到 31 字上限，
+            // 尾部 "e" 可能被截掉 → "dongle" 匹配不到。产品名前缀不会先被截。
+            return n.Contains("dongle") || n.Contains("ble remote") || n.Contains("kma")
+                || n.Contains("biboo os");
+        }
+
+        /// <summary>设备接口路径太长，日志里只留 VID/PID 段（便于确认是哪台设备触发的）。</summary>
+        private static string ShortDevicePath(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return string.Empty;
+            int v = path.IndexOf("VID_", StringComparison.OrdinalIgnoreCase);
+            int p = path.IndexOf("PID_", StringComparison.OrdinalIgnoreCase);
+            if (v >= 0 && p > v)
+            {
+                int end = path.IndexOf('&', p);
+                if (end < 0)
+                    end = Math.Min(path.Length, p + 9);
+                return path.Substring(v, end - v);
+            }
+            return path.Length <= 64 ? path : path.Substring(0, 64) + "…";
+        }
+
+        private void UpdatePttUi()
+        {
+            if (IsDisposed || _lblPtt == null)
+                return;
+
+            if (_chkPtt == null || !_chkPtt.Checked)
+            {
+                _lblPtt.Text = "○ 自动录音已关闭（仍可用按钮手动录音）";
+                _lblPtt.ForeColor = UiTheme.TextSub;
+                return;
+            }
+            if (_ptt == null)
+            {
+                _lblPtt.Text = "○ 正在启动鼠标监听…";
+                _lblPtt.ForeColor = UiTheme.TextSub;
+                return;
+            }
+            if (!_ptt.IsRegistered)
+            {
+                _lblPtt.Text = "⚠ 鼠标监听不可用（仍可按钮录音）";
+                _lblPtt.ForeColor = UiTheme.Warn;
+                return;
+            }
+            if (_running && _pttRecording)
+            {
+                _lblPtt.Text = "● 语音键录音中：松开 K5 自动结束并翻译";
+                _lblPtt.ForeColor = UiTheme.Success;
+                return;
+            }
+            if (_busy)
+            {
+                _lblPtt.Text = "◐ 正在识别/翻译上一段…";
+                _lblPtt.ForeColor = UiTheme.Warn;
+                return;
+            }
+            _lblPtt.Text = "◐ 已就绪：Win+Ctrl 开始 · Enter 结束（BLE 鼠标）";
+            _lblPtt.ForeColor = UiTheme.TextSub;
         }
 
         // ---------- 采集控制 ----------
@@ -755,21 +1264,44 @@ namespace BibooUxTool
                 return;
             }
 
+            bool rt = IsRealtime();
             _running = true;
+            _lastRms = 0f;
+            _lastRecSec = 0;
+            _lastRecUiSec = 0;
+            lock (_recGate)
+            {
+                _recBuf.Clear();
+                _recBytes = 0;
+            }
             _capture.DataAvailable += OnAudioData;
             _capture.Failed += OnCaptureFailed;
-            _vad.SegmentReady += OnSegmentReady;
-            _vad.LevelUpdated += OnLevelUpdated;
+            _vad.LevelUpdated += OnLevelUpdated;          // 两种模式都用它刷电平条
             _vad.Reset();
+            if (rt)
+                _vad.SegmentReady += OnSegmentReady;      // 只有实时模式才自动断句
             _capture.Start(dev.Index);
             UpdateButtons();
 
-            LogLine("开始采集：" + dev.Name + "（16kHz/mono/16bit）。对麦克风说话试试。",
-                UiTheme.Success);
+            if (rt)
+                LogLine("开始采集：" + dev.Name + "（16kHz/mono/16bit）。对麦克风说话试试。",
+                    UiTheme.Success);
+            else
+                LogLine("开始录音：" + dev.Name + "（16kHz/mono/16bit）。说完点【停止并翻译】，"
+                      + "整段 PCM 一次送模型，最长 " + MaxRecordSeconds + "s。", UiTheme.Success);
         }
 
         private void OnStop(object sender, EventArgs e)
         {
+            if (!_running)
+                return;
+
+            _pttRecording = false;      // 手动停止 / 语音键收尾都走这里，统一落状态
+
+            if (_tts != null)
+                _tts.Stop();          // 停止采集时顺手打断正在念的译文
+
+            bool rt = IsRealtime();
             _running = false;
             _capture.Stop();
             _capture.DataAvailable -= OnAudioData;
@@ -782,8 +1314,116 @@ namespace BibooUxTool
                 _pendingSec.Clear();
             }
             SetLevelUi(0f);
+
+            if (rt)
+            {
+                UpdateButtons();
+                LogLine("已停止采集。", UiTheme.TextSub);
+                return;
+            }
+
+            // ---- 录音模式：把整段 PCM 一次送模型 ----
+            byte[] buf;
+            lock (_recGate)
+            {
+                buf = _recBuf.ToArray();
+                _recBuf.Clear();
+                _recBytes = 0;
+            }
+            double sec = BytesToSeconds(buf.Length);
+            if (sec < MinRecordSeconds)
+            {
+                UpdateButtons();
+                LogLine("录音过短（" + sec.ToString("0.00") + "s），未送模型。", UiTheme.Warn);
+                return;
+            }
+
+            _busy = true;
             UpdateButtons();
-            LogLine("已停止采集。", UiTheme.TextSub);
+            LogLine("录音结束：" + sec.ToString("0.0") + "s / " + (buf.Length / 1024) + " KB，正在识别翻译…",
+                UiTheme.TextSub);
+            string saved = SaveWav(buf);
+            if (saved != null)
+                LogLine("录音已存：" + saved, UiTheme.TextSub);
+
+            short[] pcm = ToShortArray(buf);
+            ThreadPool.QueueUserWorkItem(delegate { RunRecorded(pcm, sec); });
+        }
+
+        private void RunRecorded(short[] pcm, double seconds)
+        {
+            try
+            {
+                ProcessSegmentAsync(pcm, seconds).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                LogLine("整段处理异常：" + ex.Message, UiTheme.Danger);
+            }
+            finally
+            {
+                _busy = false;
+                try
+                {
+                    if (!IsDisposed)
+                        BeginInvoke(new Action(UpdateButtons));
+                }
+                catch
+                {
+                    // 窗口关闭竞态：忽略。
+                }
+            }
+        }
+
+        private static double BytesToSeconds(long bytes)
+        {
+            return bytes / 2.0 / UsbAudioCapture.SampleRate;   // 16bit = 2 字节/采样点
+        }
+
+        private static short[] ToShortArray(byte[] buf)
+        {
+            var s = new short[buf.Length / 2];
+            Buffer.BlockCopy(buf, 0, s, 0, s.Length * 2);
+            return s;
+        }
+
+        /// <summary>把录到的 PCM 存成 16kHz/mono/16bit 的 WAV，便于复现测试与对比引擎。返回路径，失败返回 null。</summary>
+        private string SaveWav(byte[] pcm)
+        {
+            try
+            {
+                string dir = Path.Combine(Application.StartupPath, "records");
+                Directory.CreateDirectory(dir);
+                string path = Path.Combine(dir, "rec_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
+
+                const short bits = 16;
+                const short channels = 1;
+                int rate = UsbAudioCapture.SampleRate;
+                using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+                using (var bw = new BinaryWriter(fs))
+                {
+                    bw.Write(new[] { (byte)'R', (byte)'I', (byte)'F', (byte)'F' });
+                    bw.Write(36 + pcm.Length);
+                    bw.Write(new[] { (byte)'W', (byte)'A', (byte)'V', (byte)'E' });
+                    bw.Write(new[] { (byte)'f', (byte)'m', (byte)'t', (byte)' ' });
+                    bw.Write(16);
+                    bw.Write((short)1);                          // PCM
+                    bw.Write(channels);
+                    bw.Write(rate);
+                    bw.Write(rate * channels * bits / 8);        // byte rate
+                    bw.Write((short)(channels * bits / 8));      // block align
+                    bw.Write(bits);
+                    bw.Write(new[] { (byte)'d', (byte)'a', (byte)'t', (byte)'a' });
+                    bw.Write(pcm.Length);
+                    bw.Write(pcm);
+                }
+                return path;
+            }
+            catch (Exception ex)
+            {
+                LogLine("录音存盘失败：" + ex.Message, UiTheme.Warn);
+                return null;
+            }
         }
 
         private void OnCaptureFailed(string msg)
@@ -802,7 +1442,60 @@ namespace BibooUxTool
         {
             if (!_running)
                 return;
-            _vad.Feed(pcm);
+            _vad.Feed(pcm);            // 电平条（LevelUpdated）在两种模式下都有效
+
+            if (IsRealtime())
+                return;                // 实时模式：分段由 OnSegmentReady 负责
+
+            bool over;
+            double sec;
+            lock (_recGate)
+            {
+                _recBuf.AddRange(pcm);
+                _recBytes += pcm.Length;
+                sec = BytesToSeconds(_recBytes);
+                over = sec >= MaxRecordSeconds;
+            }
+            if (sec - _lastRecUiSec >= 0.1)      // 每 0.1s 刷一次即可，别把 UI 消息队列灌满
+            {
+                _lastRecUiSec = sec;
+                UpdateRecUi(sec);
+            }
+
+            if (over)
+            {
+                try
+                {
+                    if (!IsDisposed)
+                        BeginInvoke(new Action(() =>
+                        {
+                            LogLine("已达录音上限 " + MaxRecordSeconds + "s，自动停止并送模型。", UiTheme.Warn);
+                            OnStop(this, EventArgs.Empty);
+                        }));
+                }
+                catch
+                {
+                    // 窗口关闭竞态：忽略。
+                }
+            }
+        }
+
+        private void UpdateRecUi(double seconds)
+        {
+            if (IsDisposed)
+                return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    _lastRecSec = seconds;
+                    RefreshLevelUi();
+                }));
+            }
+            catch
+            {
+                // 窗口关闭竞态：忽略。
+            }
         }
 
         private void OnLevelUpdated(float rms)
@@ -821,11 +1514,127 @@ namespace BibooUxTool
 
         private void SetLevelUi(float rms)
         {
-            int pct = (int)Math.Round(Math.Min(1.0, rms * 8.0) * 100);   // ×8 放大显示，日常说话能到 60%+
+            _lastRms = rms;
+            RefreshLevelUi();
+        }
+
+        private void RefreshLevelUi()
+        {
+            int pct = (int)Math.Round(Math.Min(1.0, _lastRms * 8.0) * 100);   // ×8 放大显示，日常说话能到 60%+
             if (pct < 0) pct = 0;
             if (pct > 100) pct = 100;
             _barLevel.Value = pct;
-            _lblLevel.Text = "RMS " + rms.ToString("0.000");
+            _lblLevel.Text = IsRealtime()
+                ? "RMS " + _lastRms.ToString("0.000")
+                : "已录 " + _lastRecSec.ToString("0.0") + "s · RMS " + _lastRms.ToString("0.000");
+        }
+
+        // ---------- 模型预热（进入页面即后台加载，别让用户在第一句上干等） ----------
+
+        /// <summary>
+        /// 页面一显示就预热：SenseVoice 模型（228MB int8）与 llama-server（1.1GB gguf + 首句空跑）
+        /// 原本都是「第一次翻译时才加载」，用户要等好几秒；现在把这些开销提前到进页面时，
+        /// 后台线程执行、界面照常操作（可以立刻开始录音），录完点【停止并翻译】时模型通常已就绪。
+        /// </summary>
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            _shown = true;
+            InitPttWatcher();      // 先挂监听：用户进页面后随时可以按 K5
+            StartWarmup();
+            // TTS 也一进页面就后台加载（2.8s）：等用户勾「朗读译文」再录完一句，
+            // 模型早就绪了——否则首句要现场付 2.8s 加载 + 争 CPU，首音拖到 8s+。
+            StartTtsWarmup();
+        }
+
+        /// <summary>取（必要时启动）该引擎的预热任务。同一引擎只做一次；换引擎/换模型会重新预热。</summary>
+        private Task<bool> EnsureWarmupAsync(ITranslationEngine eng)
+        {
+            if (eng == null)
+                return Task.FromResult(true);
+
+            string src = _srcLang != null ? _srcLang.Code : "zh";
+            string dst = _dstLang != null ? _dstLang.Code : "en";
+
+            lock (_warmGate)
+            {
+                if (ReferenceEquals(_warmEngine, eng) && _warmTask != null)
+                    return _warmTask;
+
+                _warmEngine = eng;
+                var w = eng as IWarmupEngine;
+                if (w == null)
+                {
+                    _warmTask = Task.FromResult(true);    // 桩引擎等：无需预热
+                    return _warmTask;
+                }
+
+                // Task.Run 再包一层：WarmupAsync 内部虽有 Task.Run，但个别实现可能在首个 await 前干活，
+                // 这里保证调用瞬间立刻返回，绝不卡住 UI 线程。
+                _warmTask = Task.Run(async () =>
+                {
+                    try { return await w.WarmupAsync(src, dst).ConfigureAwait(false); }
+                    catch { return false; }
+                });
+                return _warmTask;
+            }
+        }
+
+        /// <summary>界面侧预热：更新状态行 + 日志。进页面 / 换引擎 / 换模型时触发。</summary>
+        private async void StartWarmup()
+        {
+            if (!_shown || IsDisposed)
+                return;
+
+            var eng = _engine;
+            if (eng == null)
+                return;
+
+            if (!(eng is IWarmupEngine))
+            {
+                SetWarmupUi("— 当前引擎无需预热（桩引擎不加载模型）", UiTheme.TextSub);
+                return;
+            }
+
+            var sw = Stopwatch.StartNew();
+            SetWarmupUi("◐ 正在预热：" + eng.DisplayName + "（后台加载，页面可正常操作）", UiTheme.Warn);
+            LogLine("开始预热：" + eng.DisplayName + "（后台加载模型 / 拉起本地服务）", UiTheme.TextSub);
+
+            bool ok;
+            try { ok = await EnsureWarmupAsync(eng); }
+            catch { ok = false; }
+            sw.Stop();
+
+            if (IsDisposed || !ReferenceEquals(_engine, eng))
+                return;   // 期间切了引擎：这条结果作废
+
+            if (ok)
+            {
+                SetWarmupUi("● 模型已就绪 · 预热 " + sw.ElapsedMilliseconds + " ms（之后每句只付推理时间）",
+                    UiTheme.Success);
+                LogLine("预热完成：" + eng.DisplayName + " → " + sw.ElapsedMilliseconds + " ms，可以直接说话翻译了。",
+                    UiTheme.Success);
+            }
+            else
+            {
+                SetWarmupUi("○ 预热未成功（模型缺失 / 本地服务起不来）：首次翻译会现场加载并报原因", UiTheme.Danger);
+                LogLine("预热未成功：" + eng.DisplayName + "，请检查模型文件与 llama\\llama-server.exe 是否存在。",
+                    UiTheme.Danger);
+            }
+        }
+
+        private void SetWarmupUi(string text, Color color)
+        {
+            if (IsDisposed || _lblWarmup == null)
+                return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new Action(() => SetWarmupUi(text, color))); }
+                catch { /* 关窗竞态 */ }
+                return;
+            }
+            _lblWarmup.Text = text;
+            _lblWarmup.ForeColor = color;
         }
 
         // ---------- 分段 → 引擎 ----------
@@ -865,40 +1674,7 @@ namespace BibooUxTool
                         sec = _pendingSec.Dequeue();
                     }
 
-                    var sw = Stopwatch.StartNew();
-                    string src = _srcLang != null ? _srcLang.Code : "zh";
-                    string dst = _dstLang != null ? _dstLang.Code : "en";
-                    string text;
-                    string translated;
-                    try
-                    {
-                        if (_engine.IsDirectTranslate)
-                        {
-                            // 直译引擎（如 Whisper 直译→英语）：一次推理直接产出译文，「原文」列为空
-                            translated = await _engine.TranscribeAsync(pcm, src);
-                            text = string.Empty;
-                        }
-                        else
-                        {
-                            text = await _engine.TranscribeAsync(pcm, src);
-                            translated = await _engine.TranslateTextAsync(text, src, dst);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        LogLine("引擎处理异常（" + ex.GetType().Name + "）：" + ex.Message, UiTheme.Danger);
-                        continue;
-                    }
-                    sw.Stop();
-
-                    // 原文与译文都为空（多为噪声段）：不占字幕行，仅记一条日志，保持字幕干净
-                    if (string.IsNullOrWhiteSpace(text) && string.IsNullOrWhiteSpace(translated))
-                    {
-                        LogLine("段 " + sec.ToString("0.0") + "s → 引擎 " + sw.ElapsedMilliseconds + "ms：识别为空（疑似噪声，已跳过）", UiTheme.TextSub);
-                        continue;
-                    }
-
-                    AddSubtitleRow(DateTime.Now, sec, text, translated, sw.ElapsedMilliseconds);
+                    await ProcessSegmentAsync(pcm, sec);
                 }
             }
             finally
@@ -912,6 +1688,59 @@ namespace BibooUxTool
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// 一段 PCM → 识别 → 翻译 → 上字幕。两种模式共用：
+        /// 实时模式下由 VAD 逐段调用；录音模式下被整段（可能几十秒）调用一次。
+        /// 异常与「识别为空」都在此内部消化，不向上抛。
+        /// </summary>
+        private async Task ProcessSegmentAsync(short[] pcm, double sec)
+        {
+            var sw = Stopwatch.StartNew();
+            var engine = _engine;
+            string src = _srcLang != null ? _srcLang.Code : "zh";
+            string dst = _dstLang != null ? _dstLang.Code : "en";
+            string text;
+            string translated;
+            try
+            {
+                // 预热未完成就在这里等（正常路径：进页面就开始预热，录完音时早已就绪 → 零等待）。
+                // 也避免「预热线程 + 翻译线程」同时首次加载同一个模型。
+                if (engine is IWarmupEngine)
+                    await EnsureWarmupAsync(engine);
+
+                if (engine.IsDirectTranslate)
+                {
+                    // 直译引擎（如 Whisper 直译→英语）：一次推理直接产出译文，「原文」列为空
+                    translated = await engine.TranscribeAsync(pcm, src);
+                    text = string.Empty;
+                }
+                else
+                {
+                    text = await engine.TranscribeAsync(pcm, src);
+                    translated = await engine.TranslateTextAsync(text, src, dst);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogLine("引擎处理异常（" + ex.GetType().Name + "）：" + ex.Message, UiTheme.Danger);
+                return;
+            }
+            sw.Stop();
+
+            // 原文与译文都为空（多为噪声段）：不占字幕行，仅记一条日志，保持字幕干净
+            if (string.IsNullOrWhiteSpace(text) && string.IsNullOrWhiteSpace(translated))
+            {
+                LogLine("段 " + sec.ToString("0.0") + "s → 引擎 " + sw.ElapsedMilliseconds
+                      + "ms：识别为空（疑似噪声，已跳过）", UiTheme.TextSub);
+                return;
+            }
+
+            AddSubtitleRow(DateTime.Now, sec, text, translated, sw.ElapsedMilliseconds);
+
+            // 勾了「朗读译文」就把译文送 TTS（fire-and-forget，内部串行播放）
+            SpeakText(translated);
         }
 
         private void AddSubtitleRow(DateTime ts, double seconds, string text, string translated, long costMs)
@@ -945,6 +1774,195 @@ namespace BibooUxTool
             {
                 // 窗口关闭竞态：忽略。
             }
+        }
+
+        // ---------- 译文朗读（TTS：sherpa-onnx Kokoro int8，中 + 英，103 音色） ----------
+
+        /// <summary>当前音色 id：用户手动改过就用填的，否则按目标语言自动选
+        /// （中文/粤语 → 中文音色 45，其余 → 英文音色 0）。</summary>
+        private int CurrentSpeakerId()
+        {
+            if (_sidUserSet && _numSid != null)
+            {
+                int sid;
+                if (int.TryParse(_numSid.Text.Trim(), out sid) && sid >= 0)
+                    return sid;
+            }
+            string dst = _dstLang != null ? _dstLang.Code : "en";
+            if (dst == "zh" || dst == "yue" || dst == "zh-TW")
+                return TtsEngine.DefaultSpeakerId;
+            return TtsEngine.DefaultEnglishSpeakerId;
+        }
+
+        /// <summary>当前输出设备号（NAudio WaveOut 索引；-1 = 系统默认）。</summary>
+        private int CurrentOutDevice()
+        {
+            return _cmbOut != null && _cmbOut.SelectedIndex >= 0 ? _cmbOut.SelectedIndex : -1;
+        }
+
+        /// <summary>后台预热 TTS 模型。模型不存在/未勾开关都不加载，只把状态行显示出来。</summary>
+        private void StartTtsWarmup()
+        {
+            if (_ttsWarmStarted)
+                return;
+            _ttsWarmStarted = true;
+
+            if (!TtsEngine.IsModelPresent)
+            {
+                LogLine("TTS：未找到模型（" + TtsEngine.ModelDir + "），朗读不可用；"
+                      + "把 kokoro-int8-multi-lang-v1_1 整个目录放到那里即可启用。", UiTheme.Warn);
+                UiInvoke(UpdateTtsStatus);
+                return;
+            }
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    var t = _tts ?? (_tts = new TtsEngine());
+                    string msg;
+                    if (!t.Warmup(out msg, CurrentSpeakerId()))
+                    {
+                        LogLine("TTS：" + msg, UiTheme.Warn);
+                        UiInvoke(UpdateTtsStatus);
+                        return;
+                    }
+                    LogLine("TTS 已预热：" + msg + "（音频卡勾「朗读译文」才会出声）", UiTheme.TextSub);
+                }
+                catch (Exception ex)
+                {
+                    LogLine("TTS 预热异常：" + ex.Message, UiTheme.Warn);
+                }
+                UiInvoke(UpdateTtsStatus);
+            });
+        }
+
+        /// <summary>刷新 TTS 状态行。</summary>
+        private void UpdateTtsStatus()
+        {
+            if (_lblTts == null)
+                return;
+            bool on = _chkSpeak != null && _chkSpeak.Checked;
+
+            if (!TtsEngine.IsModelPresent) { _lblTts.Text = "⚠ 缺模型"; return; }
+            if (_tts == null) { _lblTts.Text = on ? "◐ 加载中" : "○ 未加载"; return; }
+            if (_tts.LoadFailed) { _lblTts.Text = "⚠ 加载失败"; return; }
+            if (_tts.IsReady)
+                _lblTts.Text = (on ? "● " : "○ ") + _tts.NumSpeakers + " 音色";
+            else
+                _lblTts.Text = on ? "◐ 加载中" : "○ 未加载";
+        }
+
+        /// <summary>朗读文本长度上限：流式后首音只等第一片（~4-6s），但整句播完仍要
+        /// RTF≈2.17×音频时长，且期间占用朗读串行锁，超长就截断防队列积压。</summary>
+        private const int MaxSpeakChars = 200;
+
+        /// <summary>截断时优先在这些句末标点后断开（不在单词/子句中间硬切）。</summary>
+        private static readonly char[] SpeakCutPunct = "。！？!?；;".ToCharArray();
+
+        /// <summary>把超长文本压到朗读上限内：优先在句末标点处整句断开（不切断单词/句子，
+        /// 也避免只因卡在 200 字整而把一句话劈成两半），前 1/2 内没有合适标点才硬切到上限。
+        /// 配合 MaxSpeakChars 防止单句占用串行锁过久、把后面的句子全堵成队列积压。</summary>
+        private static string TruncateForSpeak(string text, int max)
+        {
+            if (text == null || text.Length <= max) return text;
+            int floor = max / 2;   // 断点太靠前会丢掉大半个句子，宁可贵点硬切
+            for (int i = max - 1; i >= floor; i--)
+            {
+                if (Array.IndexOf(SpeakCutPunct, text[i]) >= 0)
+                    return text.Substring(0, i + 1);
+            }
+            return text.Substring(0, max);   // 整段无句末标点：硬切到上限
+        }
+
+        /// <summary>送一段文本去朗读（勾了开关才播；试听用 force 强制播）。fire-and-forget。</summary>
+        private void SpeakText(string text, bool force = false)
+        {
+            bool allow = force || (_btnTestTts != null && _btnTestTts.Focused);   // 试听不受开关限制
+            if (_chkSpeak != null && !_chkSpeak.Checked && !allow)
+                return;
+            if (string.IsNullOrWhiteSpace(text))
+                return;
+
+            if (text.Length > MaxSpeakChars)
+            {
+                string full = text;
+                text = TruncateForSpeak(text, MaxSpeakChars);
+                if (text.Length < full.Length)
+                    LogLine("TTS：文本过长（" + full.Length + " 字），只读前 " + text.Length
+                        + " 字（合成比实时慢，防等待过久）。", UiTheme.TextSub);
+            }
+
+            try
+            {
+                if (_tts == null)
+                    _tts = new TtsEngine();
+                if (!_tts.IsReady)
+                    StartTtsWarmup();
+
+                if (_tts.IsReady)
+                    _tts.Stop();                       // 打断上一句，新句子立刻接上
+
+                var t = _tts;
+                // ⚠ 不能用 TaskScheduler.FromCurrentSynchronizationContext()：本方法会被翻译管线
+                // 的后台线程调用（ProcessSegmentAsync → SpeakText），那里 SynchronizationContext.Current
+                // 为 null，直接抛 InvalidOperationException「当前的 SynchronizationContext 不能用作
+                // TaskScheduler」——SpeakAsync 已启动所以照样出声，但续跑全丢、日志报错。
+                // 改走 TaskScheduler.Default，UI 更新用 UiInvoke 切回去。
+                t.SpeakAsync(text.Trim(), CurrentSpeakerId(), 1.0f, 1.0f, CurrentOutDevice())
+                 .ContinueWith(prev =>
+                 {
+                     if (prev.Exception == null)
+                         return;
+                     var ex = prev.Exception.InnerException;
+                     UiInvoke(() =>
+                     {
+                         LogLine("TTS 朗读失败：" + (ex != null ? ex.Message : "未知错误"), UiTheme.Warn);
+                         UpdateTtsStatus();
+                     });
+                 }, TaskScheduler.Default);
+            }
+            catch (Exception ex)
+            {
+                LogLine("TTS 朗读异常：" + ex.Message, UiTheme.Warn);
+            }
+        }
+
+        /// <summary>把动作切回 UI 线程执行。Translate 管线/预热都在后台线程回调 UI，
+        /// 那里拿不到 SynchronizationContext，统一走这里；句柄没了就静默丢弃。</summary>
+        private void UiInvoke(Action act)
+        {
+            if (act == null)
+                return;
+            if (IsHandleCreated)
+            {
+                try { BeginInvoke(act); return; }
+                catch (Exception) { return; }   // 窗口正在关闭，状态行更新丢就丢了
+            }
+            if (_uiCtx != null)
+            {
+                _uiCtx.Post(_ => act(), null);
+                return;
+            }
+            act();
+        }
+
+        /// <summary>试听一句：按目标语言给样例文本。Kokoro 只有中/英音色，其他语种会用英语音素念。</summary>
+        private void OnTestTts(object sender, EventArgs e)
+        {
+            string dst = _dstLang != null ? _dstLang.Code : "en";
+            string sample;
+            if (dst == "zh" || dst == "yue" || dst == "zh-TW")
+                sample = "你好，这是译文朗读测试，一二三四五。";
+            else if (dst == "en")
+                sample = "Hello, this is a speech synthesis test.";
+            else
+            {
+                LogLine("Kokoro 模型只有中/英音色，" + (_dstLang != null ? _dstLang.Name : dst)
+                      + " 会按英语音素念出来，仅供试听。", UiTheme.Warn);
+                sample = "This model supports Chinese and English only.";
+            }
+            SpeakText(sample, true);
         }
 
         // ---------- 语言选择（可搜索面板） ----------
@@ -981,6 +1999,13 @@ namespace BibooUxTool
         }
 
         // ---------- 日志 ----------
+
+        /// <summary>【清空日志】：清空日志面板内容。只清显示，不影响录音/翻译状态与统计。</summary>
+        private void OnClearLog(object sender, EventArgs e)
+        {
+            if (_txtLog != null && !_txtLog.IsDisposed)
+                _txtLog.Clear();
+        }
 
         private void LogLine(string msg, Color color)
         {

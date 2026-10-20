@@ -300,7 +300,7 @@ namespace BibooUxTool
     /// 这就是「对着鼠标说中文 → 出英文」的那条链路；反之英译中同理。
     /// 目前 MT 只有中↔英两套模型，选到别的语种会如实回一句提示，不会假装翻译成功。
     /// </summary>
-    public sealed class SenseVoiceMtEngine : ITranslationEngine
+    public sealed class SenseVoiceMtEngine : ITranslationEngine, IWarmupEngine
     {
         private readonly SenseVoiceAsrEngine _asr = new SenseVoiceAsrEngine();
         private readonly Dictionary<string, MarianMt> _models = new Dictionary<string, MarianMt>(StringComparer.Ordinal);
@@ -361,6 +361,36 @@ namespace BibooUxTool
                 var mt = GetModel(dir);
                 return mt.Translate(text, TranslationConfig.MtMaxNewTokens);
             });
+        }
+
+        /// <summary>
+        /// 预热：并行加载 SenseVoice（228MB int8）与当前方向的 OPUS-MT（3 张 onnx int8），
+        /// 再空跑一句「你好」，把 ORT 会话首帧开销也提前付掉（OPUS-MT 单句仅 200~500ms，空跑很便宜）。
+        /// </summary>
+        public async Task<bool> WarmupAsync(string srcLang, string dstLang)
+        {
+            Task<bool> asrTask = Task.Run(() => _asr.WarmupAsync(srcLang, dstLang));
+            string dir = MtPair.DirFor(srcLang, dstLang);
+
+            Task<bool> mtTask = Task.Run(() =>
+            {
+                if (string.IsNullOrEmpty(dir)) return false;
+                try
+                {
+                    var mt = GetModel(dir);
+                    mt.Translate("你好", TranslationConfig.MtMaxNewTokens);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            });
+
+            bool asrOk = false, mtOk = false;
+            try { asrOk = await asrTask.ConfigureAwait(false); } catch { }
+            try { mtOk = await mtTask.ConfigureAwait(false); } catch { }
+            return asrOk && mtOk;
         }
     }
 }

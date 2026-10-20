@@ -90,3 +90,7 @@ HIDApiTest_Telink_PC/SppTestDemo/bin/
 
 #Test
 tc_ble_single_sdk_factory
+
+# Biboo OS 发布产物与离线模型权重（体积大，随发布 zip 分发，不入库）
+HIDApiTest_Telink_PC/Publish/
+HIDApiTest_Telink_PC/BibooUxTool/BibooUxTool/Models/
