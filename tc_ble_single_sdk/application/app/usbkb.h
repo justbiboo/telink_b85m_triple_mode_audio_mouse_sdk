@@ -38,7 +38,12 @@ extern "C" {
 #define DAT_TYPE_KB			1
 #define DAT_TYPE_MOUSE		2
 
-#define USB_FIFO_NUM		4
+/*BIBOO UX diag(2026-10-19): EP busy queue depth raised 4 -> 16. The host link
+ *MSTAT counters showed fifo_drop>0 (shared 4-slot fifo overflowing on EP-busy
+ *bursts, silently discarding the oldest mouse frame = broken trajectory while
+ *drawing). Must stay a power of two: index masks use (USB_FIFO_NUM-1) and the
+ *fill-level mask uses (USB_FIFO_NUM*2-1) in usbkb.c/usbmouse.c.*/
+#define USB_FIFO_NUM		16
 #define USB_FIFO_SIZE		8
 
 extern u8 usb_fifo[USB_FIFO_NUM][USB_FIFO_SIZE];

@@ -1069,7 +1069,14 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 			//interval < 200ms
 			//long suspend < 11S
 			// interval * (latency +1)*2 <= timeout
-			if( interval_us < 200000 && long_suspend_us < 20000000 && (long_suspend_us*2<=timeout_us) )
+			/*BIBOO UX(2026-10-19): drawing-stutter fix. 0xE1 interval monitoring on the
+			 *PC diag page showed the slave only waking every ~60ms (requested latency
+			 *active) and burst-dumping ~8 motion reports per wake - the cursor moved in
+			 *60ms jerks. Reject any update that would raise latency or stretch the
+			 *interval, so the link stays at conn 10ms / latency 0. To restore stock
+			 *behaviour (save power, accept jerks), delete the last two terms.*/
+			if( interval_us < 200000 && long_suspend_us < 20000000 && (long_suspend_us*2<=timeout_us)
+				&& req->latency == 0 && interval_us <= 20000 )
 			{
 				//when master host accept slave's conn param update req, should send a conn param update response on l2cap
 				//with CONN_PARAM_UPDATE_ACCEPT; if not accept,should send  CONN_PARAM_UPDATE_REJECT

@@ -18,6 +18,8 @@
 
 #include "application/usbstd/usb.h"
 #include "drivers.h"
+#include "application/app/usbmouse.h"				/*BIBOO UX diag: usbmouse_dbg_* counters (MSTAT 0x03)*/
+#include "vendor/user/mouse_fwd/ux_mouse_fwd.h"	/*BIBOO UX diag: uxm_att_rx counter (MSTAT 0x03)*/
 #include "stack/ble/controller/ble_controller.h"	/* blc_ll_getCurrentState, BLS_LINK_STATE_CONN (mouse link up test); NOTE: ll.h alone is not self-contained - blt_event_callback_t comes from controller.h, use the ble_controller.h umbrella */
 #include "vendor/user/factory_test/ux_factory_test.h"	/*BIBOO UX: factory-test commands 0x10..0x13/0x40 (BIBOO_UX_FACTORY_TEST)*/
 #include "vendor/user/factory_test/ux_ft_proto.h"	/*BIBOO UX: FT host link protocol constants (0xE1 evt, frame offsets)*/
@@ -31,7 +33,9 @@
  *   0x00       : ECHO - default / fallback for unknown cmds (payload mirrored)
  *   0x01       : IDENT - module presence & version probe
  *   0x02       : TEST beacon - 1s periodic uplink while the mouse link is up
- *   0x03..0x7f : reserved for business commands (dongle side features)
+ *   0x03       : MSTAT - mouse-forward pipeline counters (BIBOO UX diag, see
+ *                usbmouse_dbg_* / uxm_att_rx; request p[2]=group/0xFF reset)
+ *   0x04..0x7f : reserved for business commands (dongle side features)
  *   0x10..0x13 : factory-test control cmds (FT_START/STOP/STATUS/DUT_DISCONNECT,
  *                see vendor/user/factory_test + ux_ft_proto.h)
  *   0x40       : factory-test FT_FWD fragment (bridged to the DUT mouse)
@@ -43,6 +47,7 @@
 #define UX_HLINK_CMD_ECHO    0x00
 #define UX_HLINK_CMD_IDENT   0x01
 #define UX_HLINK_CMD_BEACON  0x02
+#define UX_HLINK_CMD_MSTAT   0x03	/*mouse-forward pipeline counters (BIBOO UX diag)*/
 
 /*module identification (cmd IDENT response): "BIBOO" magic + module version*/
 #define UX_HLINK_MAGIC0      0xB1
@@ -150,6 +155,79 @@ static void ux_host_link_dispatch(const u8 *p, u8 *r)
 			dbg_hcmd_cnt ++;
 			#endif
 			break;
+
+		case UX_HLINK_CMD_MSTAT:
+		{
+			/*mouse-forward pipeline counters (locate the broken-trajectory
+			 *layer while drawing). Request p[2]: group 0 = att_rx / ring_in /
+			 *ring_drop, group 1 = tx_ok / epq / fifo_drop, 0xFF = reset all.
+			 *Response: [0]=cmd|0x80 [1]=seq [2]=status [3..14]=3 x u32 LE.
+			 *Synchronous here: a few byte copies only, EP0-irq safe.*/
+			u8  grp = p[2];
+			u32 c0, c1, c2;
+			u8  irq_en;
+
+			r[0] = UX_HLINK_CMD_MSTAT | 0x80;
+			r[1] = p[1];	/*seq echo so the PC SendCommand matcher accepts it*/
+
+			if (grp == 0xFF)
+			{
+				irq_en = irq_disable();	/*vs. USB-ISR / BLE-host increments*/
+				uxm_att_rx = 0;
+				uxm_gap_reset();
+				usbmouse_dbg_ring_in = 0;
+				usbmouse_dbg_ring_drop = 0;
+				usbmouse_dbg_tx_ok = 0;
+				usbmouse_dbg_epq = 0;
+				usbmouse_dbg_fifo_drop = 0;
+				irq_restore(irq_en);
+				r[2] = 0;	/*status OK; data bytes stay zero*/
+				break;
+			}
+
+			if (grp == 0)
+			{
+				c0 = uxm_att_rx;
+				c1 = usbmouse_dbg_ring_in;
+				c2 = usbmouse_dbg_ring_drop;
+			}
+			else if (grp == 1)
+			{
+				c0 = usbmouse_dbg_tx_ok;
+				c1 = usbmouse_dbg_epq;
+				c2 = usbmouse_dbg_fifo_drop;
+			}
+			else if (grp == 2)
+			{
+				/*dongle-time inter-arrival gaps at the att_mouse hook (immune to
+				 *the PC host-link 50ms read batching that quantizes the 0xE1
+				 *stream; see ux_mouse_fwd.c uxm_gap_*)*/
+				c0 = uxm_gap_cnt;
+				c1 = uxm_gap_max_ms;
+				c2 = uxm_gap_over20_cnt;
+			}
+			else if (grp == 3)
+			{
+				/*gap sum (avg = sum/cnt) + stream breaks; third slot reserved*/
+				c0 = uxm_gap_sum_ms;
+				c1 = uxm_gap_break_cnt;
+				c2 = 0;
+			}
+			else
+			{
+				r[2] = 1;	/*status: unknown group*/
+				break;
+			}
+
+			r[3]  = (u8)(c0);        r[4]  = (u8)(c0 >> 8);
+			r[5]  = (u8)(c0 >> 16);  r[6]  = (u8)(c0 >> 24);
+			r[7]  = (u8)(c1);        r[8]  = (u8)(c1 >> 8);
+			r[9]  = (u8)(c1 >> 16);  r[10] = (u8)(c1 >> 24);
+			r[11] = (u8)(c2);        r[12] = (u8)(c2 >> 8);
+			r[13] = (u8)(c2 >> 16);  r[14] = (u8)(c2 >> 24);
+			r[2] = 0;
+			break;
+		}
 
 		default:
 			/*unknown / ECHO command: keep the echo response*/

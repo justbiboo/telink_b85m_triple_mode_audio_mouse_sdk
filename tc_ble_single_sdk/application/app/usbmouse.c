@@ -39,6 +39,18 @@ static u8  usbmouse_wptr, usbmouse_rptr;
 static u32 usbmouse_not_released;
 static volatile u32 usbmouse_data_report_time;
 
+/*BIBOO UX diag: mouse-forward pipeline counters, readable from the PC through
+ *the host link MSTAT command (0x03, see vendor/user/host_link/ux_host_link.c).
+ *add_frame() runs in the BLE host context, hid_report() in the USB ISR - a
+ *reader may observe a one-count race between the two. ring_drop/fifo_drop
+ *counting up means mouse reports were SILENTLY DISCARDED on the dongle
+ *(the broken-trajectory symptom while drawing).*/
+volatile u32 usbmouse_dbg_ring_in;		/*frames written into mouse_dat_buff*/
+volatile u32 usbmouse_dbg_ring_drop;	/*frames lost: ring buffer full*/
+volatile u32 usbmouse_dbg_tx_ok;		/*frames handed to the USB EP*/
+volatile u32 usbmouse_dbg_epq;			/*EP busy at report time: queued into usb_fifo*/
+volatile u32 usbmouse_dbg_fifo_drop;	/*frames lost: usb_fifo full (shared with KB)*/
+
 
 
 void usbmouse_add_frame (mouse_data_t *packet_mouse, int packet_num)
@@ -46,9 +58,11 @@ void usbmouse_add_frame (mouse_data_t *packet_mouse, int packet_num)
 	for(u8 i=0;i<packet_num ;i++)
 	{
 			memcpy((s8*)(&mouse_dat_buff[usbmouse_wptr]), (s8*)(packet_mouse + i), sizeof(mouse_data_t));
+			usbmouse_dbg_ring_in ++;
 			BOUND_INC_POW2(usbmouse_wptr,USBMOUSE_BUFF_DATA_NUM);
 			if(usbmouse_wptr == usbmouse_rptr)
 			{
+					usbmouse_dbg_ring_drop ++;
 					//BOUND_INC_POW2(usbmouse_rptr,USBMOUSE_BUFF_DATA_NUM);
 					break;
 			}
@@ -119,9 +133,12 @@ int usbmouse_hid_report(u8 report_id, u8 *data, int cnt){
 		pData[2] = cnt;
 		memcpy(pData + 4, data, cnt);
 
+		usbmouse_dbg_epq ++;
+
 		int fifo_use = (usb_ff_wptr - usb_ff_rptr) & (USB_FIFO_NUM*2-1);
 		if (fifo_use > USB_FIFO_NUM) {
 			usb_ff_rptr++;
+			usbmouse_dbg_fifo_drop ++;
 			//fifo overflow, overlap older data
 		}
 
@@ -147,6 +164,7 @@ int usbmouse_hid_report(u8 report_id, u8 *data, int cnt){
 	reg_usb_ep_ctrl(USB_EDP_MOUSE) = FLD_EP_DAT_ACK | (edp_toggle[USB_EDP_MOUSE] ? FLD_USB_EP_DAT1 : FLD_USB_EP_DAT0);  // ACK
 	edp_toggle[USB_EDP_MOUSE] ^= 1;
 
+	usbmouse_dbg_tx_ok ++;
 	return 1;
 }
 

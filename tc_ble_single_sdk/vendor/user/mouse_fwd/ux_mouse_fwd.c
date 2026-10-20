@@ -37,6 +37,35 @@ int central_auto_pairing_enable = 0;
  *ux_mouse_fwd_disconnect_evt to suppress auto pairing for that disconnect*/
 int ux_unpair_no_repair = 0;
 
+/*BIBOO UX diag: BLE mouse reports received at att_mouse, counted before any
+ *USB-side buffering (host link MSTAT 0x03). Compare with the usbmouse_dbg_*
+ *counters (usbmouse.h): att_rx - tx_ok - (drops) reveals where reports vanish;
+ *a stalling att_rx rate during movement means the gap is upstream (mouse
+ *side notify / RF / BLE link), not on the dongle USB path.*/
+volatile u32 uxm_att_rx = 0;
+
+/*BIBOO UX diag: inter-arrival gap statistics measured in dongle time at the
+ *att_mouse hook (MSTAT 0x03 group 2/3, see ux_mouse_fwd.h). uxm_last_rx_tick
+ *is touched only in the att_mouse context (BLE host task); readers go through
+ *the volatile counters.*/
+volatile u32 uxm_gap_cnt = 0;
+volatile u32 uxm_gap_max_ms = 0;
+volatile u32 uxm_gap_over20_cnt = 0;
+volatile u32 uxm_gap_sum_ms = 0;
+volatile u32 uxm_gap_break_cnt = 0;
+static u32 uxm_last_rx_tick = 0;
+
+void uxm_gap_reset(void)
+{
+	uxm_gap_cnt = 0;
+	uxm_gap_max_ms = 0;
+	uxm_gap_over20_cnt = 0;
+	uxm_gap_sum_ms = 0;
+	uxm_gap_break_cnt = 0;
+	/*uxm_last_rx_tick intentionally kept: after the reset, uxm_att_rx==0 makes
+	 *the next frame re-stamp it without counting a bogus gap*/
+}
+
 
 /*power-on: enter auto pairing mode automatically
  *(dispatched from user_module_init, dongle app.c user_init)*/
@@ -134,6 +163,30 @@ void ux_mouse_fwd_disconnect_evt(u8 reason)
  *  6-byte mode splits big moves into several frames when |x| or |y| > 127*/
 void ux_mouse_fwd_att_mouse(u8 *p)
 {
+	/*BIBOO UX diag: dongle-time inter-arrival gap (MSTAT 0x03 group 2/3).
+	 *The first frame after boot/MSTAT-reset only stamps the reference time.*/
+	u32 now = clock_time();
+	if (uxm_att_rx)
+	{
+		u32 gap_ms = (u32)(now - uxm_last_rx_tick) / CLOCK_SYS_CLOCK_1MS;
+		if (gap_ms > UXM_GAP_BREAK_MS)
+		{
+			uxm_gap_break_cnt ++;	/*stream break (pen lift / pause): not a stutter*/
+		}
+		else
+		{
+			uxm_gap_cnt ++;
+			uxm_gap_sum_ms += gap_ms;
+			if (gap_ms > uxm_gap_max_ms)
+				uxm_gap_max_ms = gap_ms;
+			if (gap_ms > UXM_GAP_SPIKE_MS)
+				uxm_gap_over20_cnt ++;
+		}
+	}
+	uxm_last_rx_tick = now;
+
+	uxm_att_rx ++;	/*BIBOO UX diag: one BLE report arrived (MSTAT 0x03)*/
+
 	/*BIBOO UX: the factory-test 0xE1 bypass moved to the top level of
 	 *att_mouse (user_module_att_mouse_hlink -> ux_host_link_att_mouse),
 	 *same hook style as the LED consumer; this entry is pure USB forwarding*/

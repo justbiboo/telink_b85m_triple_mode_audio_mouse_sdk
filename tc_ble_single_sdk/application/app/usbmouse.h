@@ -49,6 +49,16 @@ typedef struct {
 #define MEDIA_REPORT_DATA_LEN		4
 int usbmouse_hid_report(u8 report_id, u8 *data, int cnt);
 
+/*BIBOO UX diag: mouse-forward pipeline counters (host link MSTAT 0x03, see
+ *vendor/user/host_link/ux_host_link.c). Defined unconditionally so both the
+ *dongle (read via host link) and the mouse builds (read via UART) can use
+ *them without extra switch macros.*/
+extern volatile u32 usbmouse_dbg_ring_in;		/*frames written into the ring buffer*/
+extern volatile u32 usbmouse_dbg_ring_drop;	/*frames lost: ring buffer full*/
+extern volatile u32 usbmouse_dbg_tx_ok;			/*frames handed to the USB EP*/
+extern volatile u32 usbmouse_dbg_epq;			/*EP busy: queued into usb_fifo*/
+extern volatile u32 usbmouse_dbg_fifo_drop;		/*frames lost: usb_fifo full*/
+
 
 /* Disable C linkage for C++ Compilers: */
 #if defined(__cplusplus)

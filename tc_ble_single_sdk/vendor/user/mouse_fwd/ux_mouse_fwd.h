@@ -28,6 +28,22 @@
 extern int central_auto_pairing_enable;
 /*BIBOO UX: one-shot flag, suppress auto pairing for the disconnect caused by unpair*/
 extern int ux_unpair_no_repair;
+/*BIBOO UX diag: BLE mouse reports received at att_mouse (host link MSTAT 0x03,
+ *see vendor/user/host_link/ux_host_link.c)*/
+extern volatile u32 uxm_att_rx;
+/*BIBOO UX diag: inter-arrival gaps measured in DONGLE time at the att_mouse
+ *hook (MSTAT 0x03 group 2/3). Unlike the PC-side 0xE1 interval monitor these
+ *are immune to the 50ms host-link read batching on the PC. Gaps > 300ms are
+ *treated as stream breaks (pen lift / pause) and counted separately so idle
+ *time does not pollute the stutter statistics.*/
+#define UXM_GAP_BREAK_MS   300
+#define UXM_GAP_SPIKE_MS   20
+extern volatile u32 uxm_gap_cnt;        /*measured in-stream gaps (<=BREAK_MS)*/
+extern volatile u32 uxm_gap_max_ms;     /*largest in-stream gap, ms*/
+extern volatile u32 uxm_gap_over20_cnt; /*in-stream gaps > SPIKE_MS (the stutter metric)*/
+extern volatile u32 uxm_gap_sum_ms;     /*sum of in-stream gaps (avg = sum/cnt)*/
+extern volatile u32 uxm_gap_break_cnt;  /*stream breaks (> BREAK_MS), e.g. pen lift*/
+void uxm_gap_reset(void);
 
 void ux_mouse_fwd_init(void);
 void ux_mouse_fwd_set_unpair_no_repair(void);
