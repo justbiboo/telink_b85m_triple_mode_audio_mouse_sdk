@@ -71,7 +71,7 @@ namespace BibooUxTool
             _linkTimer.Tick += OnLinkTimer;
             _linkTimer.Start();
 
-            LogLine("蓝牙连接就绪：默认列出系统已配对设备（连接状态实时刷新），选中 →【连接】"
+            LogLine("蓝牙连接就绪：默认列出系统已配对且已连接的设备（实时刷新），选中 →【连接】"
                   + "或双击条目即可回连并收发。未配对设备可切到【扫描附近】直连，"
                   + "或点【系统配对】从 Windows 蓝牙设置添加。「已连接」以 ATT 级真实读取为准。",
                 UiTheme.TextSub);
@@ -450,7 +450,7 @@ namespace BibooUxTool
             if (_pairedMode)
             {
                 _lblStatus.Text = "";
-                _lblPairedInfo.Text = "已配对设备列表（连接状态实时刷新，双击条目直接连接）";
+                _lblPairedInfo.Text = "已配对设备列表（仅显示已连接设备，实时刷新，双击条目直接连接）";
             }
             else
             {
@@ -466,7 +466,7 @@ namespace BibooUxTool
             _pairedMode = true;
             ApplyListMode();
             _link.StartPairedWatch();
-            LogLine("已切换到「已配对设备」：直接取系统已配对 BLE 设备，实时显示连接状态，"
+            LogLine("已切换到「已配对设备」：列出系统已配对 BLE 设备中当前已连接的，"
                   + "选中后点【连接】（或双击条目）即可回连并收发，无需先扫描。", UiTheme.TextSub);
         }
 
@@ -510,6 +510,17 @@ namespace BibooUxTool
             {
                 case BleDirectLink.PairedChangeKind.Added:
                 case BleDirectLink.PairedChangeKind.Updated:
+                    // 「已配对」列表只保留系统已连接的设备：未连接的不建行；已在列表中的
+                    // 条目掉线（Updated 且 SystemConnected=false）时立即移出，保证所见即可连。
+                    if (!info.SystemConnected)
+                    {
+                        if (_pairedItems.TryGetValue(info.DeviceId, out old))
+                        {
+                            _lstDevices.Items.Remove(old);
+                            _pairedItems.Remove(info.DeviceId);
+                        }
+                        break;
+                    }
                     if (_pairedItems.TryGetValue(info.DeviceId, out old))
                     {
                         // 同一条目重复上报（watcher + FindAll 快照）：替换对象、不重复建行
@@ -620,12 +631,9 @@ namespace BibooUxTool
         {
             if (!_pairedMode)
                 return;
-            int conn = 0;
-            foreach (var kv in _pairedItems)
-                if (kv.Value.Attached || kv.Value.SystemConnected)
-                    conn++;
-            _lblPairedInfo.Text = string.Format("共 {0} 个已配对设备 · {1} 个已连接（实时刷新，双击条目直接连接）",
-                _pairedItems.Count, conn);
+            // 「已配对」列表只保留已连接设备（见 UpsertPairedItem 过滤），计数即列表条目数。
+            _lblPairedInfo.Text = string.Format("已配对且已连接设备 {0} 个（实时刷新，双击条目直接连接）",
+                _pairedItems.Count);
         }
 
         // ---------- 事件 ----------
@@ -690,7 +698,7 @@ namespace BibooUxTool
                 if (rawCount == 0)
                 {
                     LogLine("一条广播都没收到 → 依次排查：①Windows 蓝牙是否已打开；"
-                          + "②鼠标是否处于广播态（已连 dongle / 已连其它主机时通常不广播，需重回配对/重连模式）；"
+                          + "②鼠标是否处于广播态（已连 Dongle / 已连其它主机时通常不广播，需重回配对/重连模式）；"
                           + "③距离是否过远；④是否被其它主机占用。", UiTheme.Danger);
                 }
                 else if (matchedCount == 0)
