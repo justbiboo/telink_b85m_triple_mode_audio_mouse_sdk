@@ -105,7 +105,7 @@ namespace BibooUxTool
             _timer.Interval = 50;
             _timer.Tick += OnTimerTick;
 
-            LogLine("产测页就绪：点击【连接】打开 dongle，再【进入产测】开始测试。", UiTheme.TextSub);
+            LogLine("产测页就绪：点击【连接】打开 Dongle，再【进入产测】开始测试。", UiTheme.TextSub);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -1038,7 +1038,7 @@ namespace BibooUxTool
         {
             if (_link.IsConnected)
                 return true;
-            LogLine("尚未连接 dongle。", UiTheme.Danger);
+            LogLine("尚未连接 Dongle。", UiTheme.Danger);
             return false;
         }
 

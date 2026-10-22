@@ -39,7 +39,7 @@ namespace BibooUxTool
             BuildUi();
             UpdateConnUi(false);
             LogLine("收发调试就绪（下行 0x09 Feature：15 字节，上行 0x08 Input：15 字节）。", UiTheme.TextSub);
-            LogLine("请插入 dongle 后点击【连接】。", UiTheme.TextSub);
+            LogLine("请插入 Dongle 后点击【连接】。", UiTheme.TextSub);
         }
 
         protected override void OnShown(EventArgs e)
@@ -230,7 +230,7 @@ namespace BibooUxTool
             _btnConnect.Text = connected ? "断开" : "连接";
             _lblStatus.Text = connected ? "● 已连接" : "○ 未连接";
             _lblStatus.ForeColor = connected ? UiTheme.Success : UiTheme.Danger;
-            _lblPath.Text = connected ? _link.GetOpenedPath() : "（未检测到 dongle —— 请插入后点击【连接】）";
+            _lblPath.Text = connected ? _link.GetOpenedPath() : "（未检测到 Dongle —— 请插入后点击【连接】）";
             _btnSend.Enabled = connected;
             if (!connected)
                 _lblRx.Text = "（尚未连接）";

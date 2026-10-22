@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Devices.Bluetooth;
@@ -28,6 +29,12 @@ namespace BibooUxTool
         private GattSession _session;            // 保持 BLE 链路（MaintainConnection=true）
         private GattCharacteristic _writeChar;   // 0x33F3 (C2S)
         private GattCharacteristic _notifyChar;  // 0x33F4 (S2C)
+        private GattCharacteristic _otaChar;     // Telink OTA write 特征（128-bit，OTA 升级用）
+        private Guid _otaCharUuid;               // 实际命中的 UUID 形式（规范/兜底两种之一）
+        // 诊断：设备上出现的自定义（非标准 base）128-bit UUID，OTA 特征没找到时打进日志
+        private readonly List<string> _gattCustomUuids = new List<string>();
+        // 诊断：本次枚举到的服务 UUID 列表（判断「连错设备 / 服务被系统隐藏」用）
+        private readonly List<string> _gattServiceUuids = new List<string>();
         private readonly object _sync = new object();
 
         /// <summary>建链过程中为 true：此时不上报「已连上」，等 SPP 就绪后由 ConnectAsync 统一上报。</summary>
@@ -59,6 +66,14 @@ namespace BibooUxTool
         /// </summary>
         private GattCharacteristic _probeChar;
         private string _probeName;
+
+        /// <summary>
+        /// DevInf_aaa 特征（15B，READ）：鼠标把当前版本号写在这里
+        /// （固件 vendor/8208_dual_mouse/AAA_app_att.c，挂在 OTA 服务下，handle 0x0010）。
+        /// 只读、无需配对加密、不依赖广播 —— 「读当前版本号」走它最可靠。
+        /// 见 <see cref="ReadDevInfoAsync"/>。
+        /// </summary>
+        private GattCharacteristic _devInfoChar;
 
         /// <summary>连续活性校验失败次数，达到 VerifyFailLimit 即判定链路已断。</summary>
         private volatile int _verifyFailStreak;
@@ -110,6 +125,28 @@ namespace BibooUxTool
                            _device.ConnectionStatus == BluetoothConnectionStatus.Connected &&
                            _writeChar != null &&
                            _notifyChar != null &&
+                           _verifyFailStreak < VerifyFailLimit;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 「OTA 通道就绪」判据：链路在 + OTA 写特征在 + 活性读未累计失败。
+        /// 与 <see cref="IsConnected"/> 的唯一区别：**不要求** SPP 0x33F3/0x33F4 ——
+        /// OTA 只写 128-bit OTA 特征，SPP 在不在与升级能力无关（8208 量产固件实测
+        /// 有时枚举不到 SPP 服务，但那不代表链路不通、更不代表不能升级）。
+        /// 「固件升级」页必须用本属性，不能用 IsConnected。
+        /// </summary>
+        public bool IsOtaReady
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return !_userReleased &&
+                           _device != null &&
+                           _device.ConnectionStatus == BluetoothConnectionStatus.Connected &&
+                           _otaChar != null &&
                            _verifyFailStreak < VerifyFailLimit;
                 }
             }
@@ -226,8 +263,38 @@ namespace BibooUxTool
                 Name = name,
                 Rssi = a.RawSignalStrengthInDBm,
                 LastSeen = now,
-                AddressType = a.BluetoothAddressType
+                AddressType = a.BluetoothAddressType,
+                FwVersion = ParseFwVersion(a.Advertisement)
             });
+        }
+
+        /// <summary>
+        /// 从广播 Manufacturer Data 解析固件版本（如 "v2.8"）。
+        /// 固件广播格式（vendor/8208_dual_mouse/AAA_app.c）：
+        ///   AD 0xFF：len=5, type=0xFF, company_id(2B 小端), FW_VER_MAJOR, FW_VER_MINOR
+        /// 即 ManufacturerData.Data 恰好 2 字节 = [major, minor]。
+        /// 收不到（已配对列表/未广播）返回 null。
+        /// </summary>
+        private static string ParseFwVersion(BluetoothLEAdvertisement adv)
+        {
+            if (adv == null)
+                return null;
+            try
+            {
+                foreach (var md in adv.ManufacturerData)
+                {
+                    var dr = DataReader.FromBuffer(md.Data);
+                    if (dr.UnconsumedBufferLength < 2)
+                        continue;                       // 只要 [major][minor] 两字节
+                    byte major = dr.ReadByte();
+                    byte minor = dr.ReadByte();
+                    if (major > 99 || minor > 99)
+                        continue;                       // 明显不是版本号，跳过
+                    return "v" + major + "." + minor;
+                }
+            }
+            catch { }
+            return null;
         }
 
         private void OnWatcherStopped(BluetoothLEAdvertisementWatcher sender,
@@ -494,8 +561,13 @@ namespace BibooUxTool
 
         // ---------- 连接 ----------
         /// <summary>连接指定地址的 BLE 设备并发现 SPP 特征。成功返回 null；失败返回错误描述。</summary>
+        /// <param name="requireSpp">
+        /// true（默认）= 必须找到 SPP 0x33F3/0x33F4 才算连上（收发调试页）；
+        /// false = OTA 专用：没有 SPP 但找到 128-bit OTA 写特征同样算连上。
+        /// </param>
         public async Task<string> ConnectAsync(ulong address,
-            BluetoothAddressType addrType = BluetoothAddressType.Unspecified)
+            BluetoothAddressType addrType = BluetoothAddressType.Unspecified,
+            bool requireSpp = true)
         {
             BluetoothLEDevice existing;
             lock (_sync) { existing = _device; }
@@ -538,7 +610,7 @@ namespace BibooUxTool
             try
             {
                 // 设备对象已就绪 → 走公共 attach 流程（会话保链 → Uncached 枚举 → SPP → notify → 活性读）。
-                string err = await AttachAsync(dev, true);
+                string err = await AttachAsync(dev, true, requireSpp);
                 if (err != null)
                 {
                     ReleaseDevice();
@@ -563,7 +635,9 @@ namespace BibooUxTool
         /// ② 实际建链由 Windows 对已配对设备自动完成，本工具负责等链 + 接入 + 活性校验。
         /// 成功返回 null；失败返回原因。
         /// </summary>
-        public async Task<string> ConnectByIdAsync(string deviceId, int connectTimeoutMs = 10000)
+        /// <param name="requireSpp">同 <see cref="ConnectAsync"/>：OTA 专用连接传 false。</param>
+        public async Task<string> ConnectByIdAsync(string deviceId, int connectTimeoutMs = 10000,
+                                                   bool requireSpp = true)
         {
             if (string.IsNullOrEmpty(deviceId))
                 return "设备 Id 为空（该条目不是已配对设备）";
@@ -635,7 +709,7 @@ namespace BibooUxTool
             try
             {
                 // 已配对设备不需要「配对后重试」分支（本就 paired）。
-                string err = await AttachAsync(dev, false);
+                string err = await AttachAsync(dev, false, requireSpp);
                 if (err != null)
                 {
                     ReleaseDevice();
@@ -659,7 +733,8 @@ namespace BibooUxTool
         /// ④ 发现 SPP 0x33F3/0x33F4 → ⑤ 订阅 notify → ⑥ ATT 活性读定论 → ⑦ SPP 命令信息性探测。
         /// 返回 null = 成功；否则为错误描述（调用方负责 ReleaseDevice）。
         /// </summary>
-        private async Task<string> AttachAsync(BluetoothLEDevice dev, bool allowPairRetry)
+        private async Task<string> AttachAsync(BluetoothLEDevice dev, bool allowPairRetry,
+                                               bool requireSpp = true)
         {
             // ① 维持链路：GattSession.MaintainConnection = true。
             //    这是「真连接」的关键 —— WinRT 不会因为一次 GATT 操作就长期保持 BLE 链路，
@@ -690,9 +765,26 @@ namespace BibooUxTool
             }
 
             // ④ 找 SPP 特征 0x33F3(写) / 0x33F4(notify)
-            string err = await DiscoverSppAsync(svcRes.Services, sysConnected);
-            if (err != null)
-                return err;
+            //    OTA 页（requireSpp=false）不把 SPP 当硬条件：8208 量产固件实测存在
+            //    「枚举不到 SPP 服务、但 OTA 写特征在」的情况，此时链路本身是通的，
+            //    只要 OTA 特征命中就应当放行，否则用户会看到「明明连上了却报连接失败」。
+            string sppErr = await DiscoverSppAsync(svcRes.Services, sysConnected);
+
+            // OTA 专用兜底：广扫没命中 128-bit OTA 写特征时，按 OTA 服务 UUID 定向再找一次。
+            // Windows 对自定义 128-bit 服务有时只在「按服务定向查询」时才返回特征。
+            if (!requireSpp && !HasOtaChar)
+                await TryFindOtaCharAsync();
+
+            if (sppErr != null)
+            {
+                if (requireSpp || !HasOtaChar)
+                {
+                    return requireSpp
+                        ? sppErr
+                        : "连接失败：" + sppErr + "；且未发现 OTA 写特征。" + GattDiagNote;
+                }
+                LastSppCmdNote = "该设备未暴露 SPP 特征(0x33F3/0x33F4)：本页只用 OTA 特征，不影响升级";
+            }
 
             // ⑤ 订阅 notify
             if (_notifyChar != null)
@@ -732,7 +824,9 @@ namespace BibooUxTool
             //    D21 Pro(8208) 的 spp_device.c 只处理 0x77/0x78，且整段被
             //    #ifdef USER_DATA_AUTHORIZATION 包着；DEBUG_MODE=1 的构建里该宏未定义，
             //    于是任何命令都只被打印后丢弃 —— 这不是链路问题，别误判成假连接。
-            LastSppCmdNote = await ProbeSppCommandAsync(600);
+            //    没有 SPP 特征时无从探测，直接跳过（省 600ms 白等超时）。
+            if (_notifyChar != null)
+                LastSppCmdNote = await ProbeSppCommandAsync(600);
             return null;
         }
 
@@ -823,7 +917,7 @@ namespace BibooUxTool
                 return " → 访问被拒绝：检查 Windows 蓝牙权限，或该设备已被系统/其它程序独占。";
             if (cs == BluetoothConnectionStatus.Disconnected &&
                 (gs == GattCommunicationStatus.Unreachable || gs == GattCommunicationStatus.ProtocolError))
-                return " → 设备未响应，常见原因：①设备此刻不可连接（已连 dongle/其它主机，或不在广播态）；"
+                return " → 设备未响应，常见原因：①设备此刻不可连接（已连 Dongle/其它主机，或不在广播态）；"
                      + "②随机地址已轮换（该条目广播过期，请立刻重扫后再点连接）；"
                      + "③距离过远/信号弱；④该条目本身就不是鼠标。";
             return "";
@@ -846,6 +940,7 @@ namespace BibooUxTool
                 _notifyChar = null;
                 _probeChar = null;
                 _probeName = null;
+                _devInfoChar = null;
             }
 
             _settling = false;
@@ -941,8 +1036,13 @@ namespace BibooUxTool
             {
                 _writeChar = null;
                 _notifyChar = null;
+                _otaChar = null;
+                _otaCharUuid = Guid.Empty;
                 _probeChar = null;
                 _probeName = null;
+                _devInfoChar = null;
+                _gattCustomUuids.Clear();
+                _gattServiceUuids.Clear();
             }
 
             BluetoothCacheMode primary = sysConnected
@@ -950,6 +1050,11 @@ namespace BibooUxTool
 
             foreach (var svc in services)
             {
+                // 诊断：记下服务 UUID（16-bit 短 UUID 也记），用于判断「是不是连错设备」
+                string su = svc.Uuid.ToString();
+                if (_gattServiceUuids.Count < 32 && !_gattServiceUuids.Contains(su))
+                    _gattServiceUuids.Add(su);
+
                 GattCharacteristicsResult chrRes =
                     await svc.GetCharacteristicsAsync(primary);
                 // Cached「成功但 0 特征」= 缓存视图缺失（同服务枚举），按失败处理换模式重试，
@@ -984,14 +1089,240 @@ namespace BibooUxTool
                                     : c.Uuid == BleUxProto.BatteryLevelUuid ? "0x2A19(电量)"
                                     : c.Uuid.ToString();
                     }
+
+                    // OTA 写特征（Telink BLE OTA server，128-bit UUID TELINK_SPP_DATA_OTA）。
+                    // 与 SPP 发现解耦：没有它只影响 OTA 通道，不影响收发调试。
+                    // 规范形式与「wire 字节 memcpy」兜底形式都认（平台差异，见 BleUxProto）。
+                    if (c.Uuid == BleUxProto.OtaWriteUuid || c.Uuid == BleUxProto.OtaWriteUuidRaw)
+                    {
+                        _otaChar = c;
+                        _otaCharUuid = c.Uuid;
+                    }
+
+                    // DevInf_aaa（当前版本号，只读）：挂在 OTA 服务下、紧跟 OTA 写特征之后，
+                    // 属性 CHAR_PROP_READ + ATT_PERMISSIONS_READ，无需配对/加密/广播即可读。
+                    // 规范形式与「wire 字节 memcpy」兜底形式都认（见 BleUxProto.DevInfoUuid）。
+                    if (c.Uuid == BleUxProto.DevInfoUuid || c.Uuid == BleUxProto.DevInfoUuidRaw)
+                        _devInfoChar = c;
+
+                    // 诊断用：记下自定义 128-bit UUID（标准 base UUID 结尾的 16-bit 特征不算）
+                    string ustr = c.Uuid.ToString();
+                    if (!ustr.EndsWith("-0000-1000-8000-00805f9b34fb", StringComparison.OrdinalIgnoreCase) &&
+                        _gattCustomUuids.Count < 24 && !_gattCustomUuids.Contains(ustr))
+                    {
+                        _gattCustomUuids.Add(ustr);
+                    }
                 }
-                if (_writeChar != null && _notifyChar != null)
+                if (_writeChar != null && _notifyChar != null && _otaChar != null)
                     break;
             }
 
             if (_writeChar == null && _notifyChar == null)
                 return "未发现 SPP 特征(0x33F3/0x33F4)：该设备可能不是 BIBOO 鼠标的 GATT 服务";
             return null;
+        }
+
+        /// <summary>
+        /// OTA 写特征定向兜底：按 128-bit OTA 服务 UUID（两种 GUID 形式）直接找特征，
+        /// 服务级和特征级都先 Uncached 再 Cached。广扫遍没命中时调用。
+        /// 返回 true = 已拿到 _otaChar。
+        /// </summary>
+        private async Task<bool> TryFindOtaCharAsync()
+        {
+            if (HasOtaChar)
+                return true;
+
+            BluetoothLEDevice dev;
+            lock (_sync) { dev = _device; }
+            if (dev == null)
+                return false;
+
+            foreach (var svcMode in new[] { BluetoothCacheMode.Uncached, BluetoothCacheMode.Cached })
+            {
+                GattDeviceServicesResult svcRes;
+                try { svcRes = await dev.GetGattServicesAsync(svcMode); }
+                catch { continue; }
+                if (svcRes == null || svcRes.Status != GattCommunicationStatus.Success ||
+                    svcRes.Services == null)
+                    continue;
+
+                foreach (var svc in svcRes.Services)
+                {
+                    if (svc.Uuid != BleUxProto.OtaServiceUuid &&
+                        svc.Uuid != BleUxProto.OtaServiceUuidRaw)
+                        continue;
+
+                    foreach (var chrMode in new[] { BluetoothCacheMode.Uncached, BluetoothCacheMode.Cached })
+                    {
+                        GattCharacteristicsResult chrRes;
+                        try { chrRes = await svc.GetCharacteristicsAsync(chrMode); }
+                        catch { continue; }
+                        if (chrRes == null || chrRes.Status != GattCommunicationStatus.Success ||
+                            chrRes.Characteristics == null)
+                            continue;
+
+                        foreach (var c in chrRes.Characteristics)
+                        {
+                            // 顺便补活性读探针：OTA 服务里有一个 READ 权限的设备信息特征
+                            // （TELINK 128-bit DevInf），没有 SPP 时正好用它证明链路活着。
+                            if (_probeChar == null &&
+                                (c.CharacteristicProperties & GattCharacteristicProperties.Read) != 0)
+                            {
+                                lock (_sync)
+                                {
+                                    _probeChar = c;
+                                    _probeName = "OTA 服务可读特征 " + c.Uuid;
+                                }
+                            }
+
+                            if (c.Uuid == BleUxProto.DevInfoUuid || c.Uuid == BleUxProto.DevInfoUuidRaw)
+                                _devInfoChar = c;
+
+                            if (c.Uuid != BleUxProto.OtaWriteUuid &&
+                                c.Uuid != BleUxProto.OtaWriteUuidRaw)
+                                continue;
+                            lock (_sync) { _otaChar = c; _otaCharUuid = c.Uuid; }
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>是否发现了 Telink OTA 写特征（供「固件升级」页判断 BLE 直连 OTA 是否可用）。</summary>
+        public bool HasOtaChar
+        {
+            get { lock (_sync) { return _otaChar != null; } }
+        }
+
+        /// <summary>实际命中的 OTA 特征 UUID（未找到时为 Guid.Empty）。</summary>
+        public Guid OtaCharUuid
+        {
+            get { lock (_sync) { return _otaCharUuid; } }
+        }
+
+        /// <summary>是否发现了 DevInf_aaa（当前版本号，只读）特征。</summary>
+        public bool HasDevInfoChar
+        {
+            get { lock (_sync) { return _devInfoChar != null; } }
+        }
+
+        /// <summary>
+        /// 读取鼠标当前固件版本号（DevInf_aaa，15 字节，GATT 只读）。
+        /// 该特征无需配对/加密/广播，已连接即可读。
+        /// 返回 null = 未找到该特征或读取失败；否则为解析后的 <see cref="BleDevInf"/>。
+        /// </summary>
+        public async Task<BleDevInf> ReadDevInfoAsync(int timeoutMs = 1200)
+        {
+            GattCharacteristic dev;
+            lock (_sync) { dev = _devInfoChar; }
+            if (dev == null)
+                return null;
+
+            GattReadResult res;
+            try
+            {
+                var cts = new CancellationTokenSource(timeoutMs);
+                Task<GattReadResult> t = dev.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(cts.Token);
+                Task done = await Task.WhenAny(t, Task.Delay(Timeout.Infinite, cts.Token));
+                if (done != t)
+                    return null;
+                res = await t;
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            if (res.Status != GattCommunicationStatus.Success)
+                return null;
+
+            byte[] buf;
+            try
+            {
+                var dr = DataReader.FromBuffer(res.Value);
+                int len = (int)dr.UnconsumedBufferLength;
+                buf = new byte[len];
+                if (len > 0)
+                    dr.ReadBytes(buf);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            return BleDevInf.Parse(buf);
+        }
+
+        /// <summary>
+        /// GATT 级诊断：本次枚举到的全部服务 UUID + 自定义 128-bit 特征 UUID。
+        /// 「找不到某个特征」时打进日志，一眼分辨是连错设备、服务被系统缓存挡住、
+        /// 还是固件确实没编入该服务。
+        /// </summary>
+        public string GattDiagNote
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    var sb = new StringBuilder();
+                    sb.Append("本次枚举到 ").Append(_gattServiceUuids.Count).Append(" 个服务：");
+                    sb.Append(_gattServiceUuids.Count == 0
+                        ? "(空 —— 服务枚举失败/被系统缓存挡住)"
+                        : string.Join(" / ", _gattServiceUuids.ToArray()));
+                    if (_gattCustomUuids.Count > 0)
+                    {
+                        sb.Append("；自定义 128-bit 特征：");
+                        sb.Append(string.Join(" / ", _gattCustomUuids.ToArray()));
+                    }
+                    return sb.ToString();
+                }
+            }
+        }
+
+        /// <summary>
+        /// OTA 特征诊断：设备上出现过的自定义 128-bit UUID 列表。
+        /// 未找到 OTA 特征时打进日志，一眼看出「固件里到底有没有 OTA 服务」。
+        /// </summary>
+        public string OtaDiagNote
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    if (_otaChar != null)
+                        return "OTA 写特征已命中：" + _otaCharUuid;
+                    if (_gattCustomUuids.Count == 0)
+                        return "设备没有暴露任何自定义 128-bit UUID（该固件未编入 OTA 服务，"
+                             + "检查 BLE_OTA_SERVER_ENABLE / BOOTLOADER_OTA_ENABLE）。" + GattDiagNote;
+                    return "设备自定义 128-bit UUID：" + string.Join(" / ", _gattCustomUuids.ToArray());
+                }
+            }
+        }
+
+        /// <summary>
+        /// 写一个 OTA PDU（≤20B）到 Telink OTA 特征（write without response）。
+        /// 成功返回 null；未连接/未发现特征/写入失败返回错误描述。
+        /// </summary>
+        public async Task<string> WriteOtaAsync(byte[] pdu)
+        {
+            GattCharacteristic c;
+            lock (_sync) { c = _otaChar; }
+            if (c == null)
+                return "未发现 OTA 写特征（" + BleUxProto.OtaWriteUuid + "）；" + OtaDiagNote;
+            if (pdu == null || pdu.Length == 0 || pdu.Length > 20)
+                return "OTA PDU 长度须为 1..20 字节";
+
+            var dw = new DataWriter();
+            dw.WriteBytes(pdu);
+            GattCommunicationStatus res =
+                await c.WriteValueAsync(dw.DetachBuffer(), GattWriteOption.WriteWithoutResponse);
+            return res == GattCommunicationStatus.Success ? null : "写 OTA 特征失败：" + res;
         }
 
         private static async Task TryPairAsync(BluetoothLEDevice dev)

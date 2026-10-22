@@ -7,14 +7,17 @@ using System.Windows.Forms;
 namespace BibooUxTool
 {
     /// <summary>
-    /// 启动首页：列出全部功能模块，由用户自行选择进入（客户调试版 customerDebugRelease=true 时只显示蓝牙连接与实时翻译）。
-    ///   ① 收发调试      —— 经 USB dongle 的 Host Link HID 通道收发 15 字节报文。
+    /// 启动首页：列出功能模块，由用户自行选择进入。当前为全模块版（ShowAllModules=true），
+    /// 六张卡全部显示；把 ShowAllModules 改回 false 即回到精简版（实时翻译 + 固件升级两张），
+    /// 窗口高度、副标题、页脚提示都会跟着自动还原，不用再动别处。
+    ///   ① 收发调试      —— 经 USB dongle 的 Host Link HID 通道收发 15 字节报文（客户调试版隐藏）。
     ///   ② 蓝牙连接        —— PC 直连 BLE（不依赖 dongle），扫描 / 发现 SPP / Ping 校验。
-    ///   ③ 实时翻译        —— USB Audio 采集 → VAD 断句 → 翻译引擎 → 实时字幕（框架版，暂不走 BLE）。
+    ///   ③ 实时翻译        —— USB Audio 采集 → VAD 断句 → 本地识别（SenseVoice）→ 离线翻译（混元）→ 字幕与朗读。
     ///   ④ 产线测试        —— 经 dongle 走 UX 产测协议（DUT）。
     ///   ⑤ 鼠标诊断        —— 经 dongle 读鼠标链路丢帧计数器（MSTAT 0x03）+ 0xE1 间隔监视。
-    /// 各模块各自独立；其中 ① 与 ④ 共用 dongle 的 HID 通道，本页以模态方式逐个打开，
-    /// 天然保证两者不会同时占用同一通道。
+    ///   ⑥ 固件升级        —— 给鼠标刷 Telink bin（USB dongle 透传 SPP / BLE 直连写 OTA 特征），两种模式都显示。
+    /// 各模块各自独立；其中 ① / ④ / ⑤ / ⑥(dongle 通道) 共用 dongle 的 HID 通道，本页以模态方式逐个打开，
+    /// 天然保证它们不会同时占用同一通道。
     /// </summary>
     public sealed class HomeForm : Form
     {
@@ -22,12 +25,13 @@ namespace BibooUxTool
         private const int CardHeight = 116;
 
         /// <summary>
-        /// 是否显示「实时翻译」以外的模块入口（蓝牙连接 / 产线测试 / 鼠标诊断）。
-        /// 本版本只保留实时翻译主线，四张卡的代码全部留在原处：改回 true 即整体恢复，
+        /// 是否显示「实时翻译」以外的模块入口（收发调试 / 蓝牙连接 / 产线测试 / 鼠标诊断；
+        /// 固件升级恒显，不受此开关控制）。
+        /// 现为全模块版：六张卡全部显示；改回 false 即回到精简版（实时翻译 + 固件升级两张），
         /// 窗口高度、副标题、页脚提示都会跟着自动还原，不用再动别处。
         /// ⚠ 不能用 const —— const 会让下面的 if 分支被编译器判成死代码（CS0162）。
         /// </summary>
-        private static readonly bool ShowAllModules = false;
+        private static readonly bool ShowAllModules = true;
 
         /// <summary>三张模块卡片（窗口拉高时整体垂直居中用）。</summary>
         private readonly List<ModeCard> _cards = new List<ModeCard>();
@@ -59,12 +63,15 @@ namespace BibooUxTool
             BackColor = UiTheme.FormBg;
             Font = UiTheme.FontBody;
 
-            // 客户调试版：只保留蓝牙连接与实时翻译入口（功能代码保留，开关改回 false 即恢复全部模块首页）。
+            // 客户调试版开关：true 时隐藏「收发调试」入口（功能代码保留）；当前 false = 全功能版。
             // 注意：不能声明为 const —— const 会让两个 if 分支被编译器判定为死代码（CS0162 警告）。
-            bool customerDebugRelease = true;
+            bool customerDebugRelease = false;
 
-            // 可见卡片数：收发调试(仅非客户版) + 蓝牙连接 + 实时翻译 + 产线测试 + 鼠标诊断
-            int cardCount = ShowAllModules ? (customerDebugRelease ? 4 : 5) : 1;
+            // 可见卡片数（必须与下面实际 Add 的卡片一一对应，改任一支勿忘同步此式）：
+            //   全模块 = 收发调试(仅非客户版) + 蓝牙连接 + 实时翻译 + 固件升级(恒显) + 产线测试 + 鼠标诊断
+            //   → customerDebugRelease=true 时 5 张，false 时 6 张
+            //   精简版固定两张：实时翻译 + 固件升级(OTA)
+            int cardCount = ShowAllModules ? (customerDebugRelease ? 5 : 6) : 2;
             int clientHeight = 92 + cardCount * CardHeight + (cardCount - 1) * 16 + 72;
             if (clientHeight < 300)
                 clientHeight = 300;          // 单卡时也留出标题与页脚区域，不要压成一条
@@ -93,10 +100,10 @@ namespace BibooUxTool
 
             _lblSub = new Label();
             if (!ShowAllModules)
-                _lblSub.Text = "调试版本：实时翻译（USB Audio 采集 → 本地识别 → 离线翻译 → 字幕与朗读）";
+                _lblSub.Text = "调试版本：实时翻译（USB Audio 采集 → 本地识别 → 离线翻译 → 字幕与朗读）与固件升级（OTA）";
             else
                 _lblSub.Text = customerDebugRelease
-                    ? "调试版本：可进入蓝牙连接（读写滑动参数配置）或实时翻译（USB Audio 字幕框架）"
+                    ? "调试版本：可进入蓝牙连接、实时翻译、固件升级、产线测试或鼠标诊断（收发调试已隐藏）"
                     : "请选择要进入的功能模块（各模块相互独立，可分别单独使用）";
             _lblSub.ForeColor = UiTheme.TextSub;
             _lblSub.SetBounds(24, 56, 700, 20);
@@ -111,14 +118,14 @@ namespace BibooUxTool
             if (ShowAllModules && !customerDebugRelease)
                 Controls.Add(MakeCard(ref y, "HID", UiTheme.Primary,
                     "收发调试",
-                    "经 USB dongle 的 Host Link HID 通道直接收发：下行 0x09 Feature（15 字节）、"
+                    "经 USB Dongle 的 Host Link HID 通道直接收发：下行 0x09 Feature（15 字节）、"
                     + "上行 0x08 Input（15 字节），带实时收发日志与链路断开提示。",
                     OnOpenDongle));
 
             if (ShowAllModules)
                 Controls.Add(MakeCard(ref y, "BLE", UiTheme.Accent,
                     "蓝牙连接",
-                    "不依赖 dongle：直接列出系统已配对设备并实时显示连接状态，选中即回连收发；"
+                    "不依赖 Dongle：直接列出系统已配对设备并实时显示连接状态，选中即回连收发；"
                     + "也可扫描附近设备直连。已连接以 ATT 级真实读取校验，杜绝幽灵连接。",
                     OnOpenBle));
 
@@ -130,12 +137,20 @@ namespace BibooUxTool
                 + "（混元 Hy-MT2，38 语种）→ 实时字幕，并可把译文朗读出来。全程离线、不联网。",
                 OnOpenTranslator));
 
+            // 固件升级（OTA）：给鼠标刷 Telink bin。USB dongle 通道需先补固件命令，
+            // BLE 直连通道走鼠标自带 OTA 特征（BLE_OTA_SERVER_ENABLE=1）。默认模拟模式。
+            Controls.Add(MakeCard(ref y, "OTA", UiTheme.Accent,
+                "固件升级",
+                "选择 Telink bin（自动读出版本/大小/CRC），经 USB Dongle 或 BLE 直连写给鼠标："
+                + "CRC16 分片校验、进度/速率/剩余时间、失败可定位到具体 PDU。",
+                OnOpenOta));
+
             // 产线测试：解除 customerDebugRelease 屏蔽（用户要求打开），与收发调试解耦单独显示。
             // 保留 customerDebugRelease 仅控制「收发调试」入口与底部提示。
             if (ShowAllModules)
                 Controls.Add(MakeCard(ref y, "FT", UiTheme.Warn,
                     "产线测试",
-                    "经 dongle 走 UX 产测协议（DUT）：固件版本 / 型号 / 鼠标报告 LED / 鉴权往返等。"
+                    "经 Dongle 走 UX 产测协议（DUT）：固件版本 / 型号 / 鼠标报告 LED / 鉴权往返等。"
                     + "与收发调试共用 HID 通道，两者不可同时打开。",
                     OnOpenFactory));
 
@@ -143,14 +158,14 @@ namespace BibooUxTool
             if (ShowAllModules)
                 Controls.Add(MakeCard(ref y, "DG", UiTheme.Primary2,
                     "鼠标诊断",
-                    "定位鼠标画线卡顿/断线发生在哪一环：读取 dongle 的 BLE 收帧 / USB 发出 / "
+                    "定位鼠标画线卡顿/断线发生在哪一环：读取 Dongle 的 BLE 收帧 / USB 发出 / "
                     + "ring、fifo 两处缓冲丢帧计数器（MSTAT 0x03），并可在产测模式下监视 0xE1 "
                     + "报告流间隔，区分 BLE 上游与 USB/PC 下游。",
                     OnOpenDiag));
 
             _lblFoot = new Label();
-            _lblFoot.Text = "提示：收发调试 / 产线测试 / 鼠标诊断共用 dongle 的 HID 通道，三者同时只能打开一个；"
-                          + "蓝牙连接与实时翻译相互独立，可随时进入。";
+            _lblFoot.Text = "提示：收发调试 / 产线测试 / 鼠标诊断 / 固件升级（USB Dongle 通道）共用 Dongle 的 HID 通道，"
+                          + "四者同时只能打开一个；蓝牙连接与实时翻译相互独立，可随时进入。";
             _lblFoot.Visible = ShowAllModules && !customerDebugRelease;   // 单模块版不显示多模块互斥提示
             _lblFoot.ForeColor = UiTheme.TextSub;
             _lblFoot.SetBounds(22, ClientSize.Height - 40, 736, 20);
@@ -252,6 +267,14 @@ namespace BibooUxTool
         private void OnOpenTranslator(object sender, EventArgs e)
         {
             using (var f = new TranslatorForm())
+            {
+                f.ShowDialog(this);
+            }
+        }
+
+        private void OnOpenOta(object sender, EventArgs e)
+        {
+            using (var f = new OtaForm())
             {
                 f.ShowDialog(this);
             }

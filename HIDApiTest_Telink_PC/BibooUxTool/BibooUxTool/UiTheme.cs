@@ -54,7 +54,16 @@ namespace BibooUxTool
         {
             // 先按父容器背景色铺满整个矩形：圆角路径外的像素若保持窗口初始
             // 内容会显示为黑点，描边抗锯齿与黑色混合后更明显。
-            Color parentBg = Parent != null ? Parent.BackColor : UiTheme.FormBg;
+            // 同样要沿父链跳过透明层（Color.Transparent 铺上去就是透明黑）。
+            Color parentBg = UiTheme.FormBg;
+            for (Control p = Parent; p != null; p = p.Parent)
+            {
+                if (p.BackColor.A != 0)
+                {
+                    parentBg = p.BackColor;
+                    break;
+                }
+            }
             using (var brush = new SolidBrush(parentBg))
             {
                 e.Graphics.FillRectangle(brush, ClientRectangle);
@@ -178,14 +187,32 @@ namespace BibooUxTool
             // 避免 UserPaint 管线下 OnPaintBackground 不生效导致的圆角黑点。
         }
 
+        /// <summary>
+        /// 取绘制底色：沿父链向上找第一个 Alpha≠0 的 BackColor。
+        /// 中间层常为 Color.Transparent（透明子面板），必须跳过，否则
+        /// Clear(Transparent) 会在圆角外留下透明黑，形成视觉上的黑边。
+        /// </summary>
+        private Color ResolveBackColor()
+        {
+            for (Control p = Parent; p != null; p = p.Parent)
+            {
+                Color c = p.BackColor;
+                if (c.A != 0)
+                    return c;
+            }
+            return UiTheme.FormBg;
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
 
             // 1) 先用父容器背景色彻底铺满客户区（Clear 不受抗锯齿影响，
             //    不会与缓冲位图初始黑色混合产生暗边 / 角部黑点）。
-            Color parentBg = Parent != null ? Parent.BackColor : Color.White;
-            g.Clear(parentBg);
+            //    ⚠ 必须沿父链找到第一个**不透明** BackColor：子面板常设成
+            //    Color.Transparent（如 OtaForm._pnlBle/_pnlUsb），直接 Clear 透明色
+            //    等于在圆角外铺一层透明黑，抗锯齿过渡区会显出黑边。
+            g.Clear(ResolveBackColor());
 
             // 2) 圆角主体绘制需要平滑边缘，此处再开启抗锯齿。
             g.SmoothingMode = SmoothingMode.AntiAlias;

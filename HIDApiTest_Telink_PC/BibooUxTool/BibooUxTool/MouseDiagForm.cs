@@ -137,7 +137,7 @@ namespace BibooUxTool
             _cardCnt = new RoundedPanel();
             _cardCnt.SetBounds(CardMargin, yCnt, 896, 252);
             _cardCnt.Anchor = AnchorStyles.Top;
-            _cardCnt.Controls.Add(MakeCardTitle("链路计数器（dongle 侧，MSTAT 0x03）"));
+            _cardCnt.Controls.Add(MakeCardTitle("链路计数器（Dongle 侧，MSTAT 0x03）"));
 
             _btnCntRefresh = MakeButton("刷新", 16, 30, 92, 26, true, OnCntRefresh);
             _btnCntAuto = MakeButton("自动刷新", 116, 30, 92, 26, false, OnCntAuto);
@@ -179,8 +179,8 @@ namespace BibooUxTool
             hintCnt.AutoSize = false;
             hintCnt.Font = new Font(UiTheme.FontBody.FontFamily, 8.5f);
             hintCnt.ForeColor = UiTheme.TextSub;
-            hintCnt.Text = "判读：ring丢 / fifo丢 随画线上涨 = dongle 缓冲溢出丢帧（红色）；"
-                + "BLE收帧 ≈ USB发出 且两处丢帧全 0 = dongle 无丢帧，问题在 BLE 上游（鼠标端/RF）或 PC 侧。";
+            hintCnt.Text = "判读：ring丢 / fifo丢 随画线上涨 = Dongle 缓冲溢出丢帧（红色）；"
+                + "BLE收帧 ≈ USB发出 且两处丢帧全 0 = Dongle 无丢帧，问题在 BLE 上游（鼠标端/RF）或 PC 侧。";
             _cardCnt.Controls.Add(hintCnt);
             _cardCnt.Controls.AddRange(new Control[] { _btnCntRefresh, _btnCntAuto, _btnCntReset });
 
@@ -210,7 +210,7 @@ namespace BibooUxTool
             hintGap.AutoSize = false;
             hintGap.Font = new Font(UiTheme.FontBody.FontFamily, 8.5f);
             hintGap.ForeColor = UiTheme.TextSub;
-            hintGap.Text = "间隔平稳但系统光标仍卡顿 → 问题在 dongle USB 上报之后（PC/系统侧）；"
+            hintGap.Text = "间隔平稳但系统光标仍卡顿 → 问题在 Dongle USB 上报之后（PC/系统侧）；"
                 + "间隔同样出现尖峰 → 问题在 BLE 上游。产测模式只增加上行镜像，不改变 USB 转发路径。";
             _cardGap.Controls.AddRange(new Control[]
             {
@@ -458,7 +458,7 @@ namespace BibooUxTool
             }
             _cntInit = false;
             RefreshCounters();
-            LogLine("dongle 计数器已清零。", UiTheme.Success);
+            LogLine("Dongle 计数器已清零。", UiTheme.Success);
         }
 
         // ---------- 0xE1 间隔监视 ----------
@@ -516,11 +516,11 @@ namespace BibooUxTool
                 ? string.Join("; ", _e1BigGaps.ToArray())
                 : "（无）";
             string dgLine = _dgGapInit
-                ? string.Format("[dongle 实测] 间隔 {0}  平均 {1:0.0} ms  最大 {2} ms  >20ms {3} 次  断流 {4} 次",
+                ? string.Format("[Dongle 实测] 间隔 {0}  平均 {1:0.0} ms  最大 {2} ms  >20ms {3} 次  断流 {4} 次",
                     _dgGapCnt,
                     _dgGapCnt > 0 ? (double)_dgGapSumMs / _dgGapCnt : 0,
                     _dgGapMaxMs, _dgGapOver20, _dgGapBreak)
-                : "[dongle 实测] 尚未读取（需新固件 MSTAT 组2/3）";
+                : "[Dongle 实测] 尚未读取（需新固件 MSTAT 组2/3）";
             _lblGapStats.Text = string.Format(
                 "报告数 {0}   平均 {1:0.0} ms   最大 {2:0.0} ms\r\n> {3} ms 次数 {4}（最近一次 {5:0.0} ms）\r\n> {6:0} ms 尖峰 {7} 次：{8}\r\n{9}",
                 _e1Count, avg, _e1MaxMs, GapThresholdMs, _e1GapCnt, _e1LastGapMs,

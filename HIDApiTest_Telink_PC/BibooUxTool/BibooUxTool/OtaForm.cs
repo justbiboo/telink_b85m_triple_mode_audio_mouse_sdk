@@ -12,7 +12,7 @@ namespace BibooUxTool
     /// 固件升级（OTA）页：把 Telink bin 经三条通道之一送出去——
     ///   ① USB dongle：PC 经 USB 把固件灌进 dongle → dongle 实时组 OTA PDU 走 BLE 推给鼠标（OtaChannelUsbDongle，不写 dongle flash，鼠标零改动）
     ///   ② BLE 直连 ：PC 直连鼠标，写其 Telink OTA 特征（OtaChannelBle）
-    ///   ③ Dongle 自身：镜像经 host link 0x60..0x65 写进 dongle 自己的备用 A/B bank，校验通过后 COMMIT 切换（DongleSelfOta）
+    ///   ③ Dongle 自身：镜像经 host link 0x70..0x75 写进 dongle 自己的备用 A/B bank，校验通过后 COMMIT 切换（DongleSelfOta）
     /// 协议层（bin 解析 / CRC16 / PDU 构造 / 状态机）见 OtaCore.cs，移植自 tool/ota_app 与
     /// SDK stack/ble/service/ota + blm_ota.c。
     ///
@@ -34,12 +34,12 @@ namespace BibooUxTool
 
         // 通道卡
         private RadioButton _radUsb;
-        private RadioButton _radSelf;   // Dongle 自身固件升级（host link 0x60..0x65）
+        private RadioButton _radSelf;   // Dongle 自身固件升级（host link 0x70..0x75）
         private RadioButton _radBle;
         private Panel _pnlUsb;
         private Panel _pnlBle;
         private Button _btnUsbConnect;
-        private Button _btnSelfInfo;    // 查询 A/B bank 布局（0x64，只读）
+        private Button _btnSelfInfo;    // 查询 A/B bank 布局（0x74，只读）
         private Label _lblUsbState;
         private Button _btnBleConnect;
         private ListBox _lstBle;
@@ -183,7 +183,7 @@ namespace BibooUxTool
             _btnUsbConnect = MakeButton("连接 Dongle", 0, 8, 110, 28, true, OnUsbConnect);
             _pnlUsb.Controls.Add(_btnUsbConnect);
 
-            // 「查询 Bank」只在「Dongle 自身」通道出现：读一次 0x64，把 A/B 布局打到日志
+            // 「查询 Bank」只在「Dongle 自身」通道出现：读一次 0x74，把 A/B 布局打到日志
             _btnSelfInfo = MakeButton("查询 Bank", 116, 8, 96, 28, false, OnSelfInfo);
             _btnSelfInfo.Visible = false;
             _pnlUsb.Controls.Add(_btnSelfInfo);
@@ -460,7 +460,7 @@ namespace BibooUxTool
                 _btnStart.Text = _radSelf.Checked ? "升级 Dongle" : "开始升级";
         }
 
-        /// <summary>查询 A/B bank 布局（0x64，只读无副作用），把结果打到日志。</summary>
+        /// <summary>查询 A/B bank 布局（0x74，只读无副作用），把结果打到日志。</summary>
         private void OnSelfInfo(object sender, EventArgs e)
         {
             if (_dongle == null || !_dongle.IsConnected)
@@ -492,35 +492,80 @@ namespace BibooUxTool
                     LogLine("Dongle 已断开", UiTheme.TextSub);
                     return;
                 }
-                _dongle = new DongleLink();
-                string err = _dongle.Connect();
-                if (err != null)
-                {
-                    _lblUsbState.Text = "连接失败：" + err;
-                    LogLine("连接 Dongle 失败：" + err, UiTheme.Danger);
-                    return;
-                }
-                byte[] rsp;
-                int r = _dongle.SendCommand(UxFtProto.CmdOtaStatus, null, DongleLink.CommandTimeoutMs, out rsp, out err);
-                if (r == 1 && rsp[UxFtProto.UlOffsStatus] == UxFtProto.StOk)
-                {
-                    LogLine("Dongle 已连接：" + _dongle.GetOpenedPath() + "，OTA 流管道命令就绪（0x50..0x52/0x54）", UiTheme.Success);
 
-                    // BIBOO UX 2026-10-21：连上后读一次鼠标固件版本号。鼠标此刻被 dongle
-                    // 独占 BLE 链路（PC 无法另开一路 GATT 读），故由 dongle 以 BLE master
-                    // 身份读 OTA 服务下的只读特征 DevInf_aaa（句柄 0x0010）后经 0x55 中继回来。
-                    ReadDongleDevInfo();
-                }
-                else
+                // 2026-10-22：打开 + 握手全程移到后台线程。Dongle 半死（如升级事故后
+                // EP0 卡死）时每条 SET_REPORT 控制传输要挂 ~5s 才报错，同步跑在 UI 线程
+                // 就是 0x50 一条 + DevInf 0x55 多帧 = 15s+，窗口直接“未响应”。
+                _dongle = new DongleLink();
+                _btnUsbConnect.Enabled = false;
+                _lblUsbState.Text = "正在连接 Dongle…";
+
+                System.Threading.Tasks.Task.Run(() =>
                 {
-                    _lblUsbState.Text = "已连接，但 Dongle 固件不支持 OTA 流管道命令：请升级 Dongle 固件（2026-10-20 后版本）";
-                    LogLine("Dongle 固件过旧：无 OTA 状态响应（" + (err ?? "status 异常") + "）", UiTheme.Warn);
-                }
+                    string err = _dongle.Connect();
+                    if (err != null)
+                    {
+                        UiLog("连接 Dongle 失败：" + err, 2);
+                        SafeConnectUi("连接失败：" + err);
+                        return;
+                    }
+
+                    byte[] rsp;
+                    int r = _dongle.SendCommand(UxFtProto.CmdOtaStatus, null, DongleLink.CommandTimeoutMs, out rsp, out err);
+                    if (r == 1 && rsp[UxFtProto.UlOffsStatus] == UxFtProto.StOk)
+                    {
+                        UiLog("Dongle 已连接：" + _dongle.GetOpenedPath() + "，OTA 流管道命令就绪（0x50..0x52/0x54）", 3);
+
+                        // 先落默认状态栏文案，再读 DevInf——后者的 BeginInvoke 排在后面，
+                        // 读取成功时状态栏最终显示带鼠标版本号的文案。
+                        SafeConnectUi("已连接 Dongle（OTA 流管道就绪）");
+
+                        // BIBOO UX 2026-10-21：连上后读一次鼠标固件版本号。鼠标此刻被 dongle
+                        // 独占 BLE 链路（PC 无法另开一路 GATT 读），故由 dongle 以 BLE master
+                        // 身份读 OTA 服务下的只读特征 DevInf_aaa（句柄 0x0010）后经 0x55 中继回来。
+                        ReadDongleDevInfo();
+
+                        // 2026-10-22：读 dongle 运行固件 build 号（0x76）。原地覆盖 COMMIT 后
+                        // 运行 bank 恒为 0x00000、bin 头版本恒为 0，这个 build 号是升级
+                        // 真正落地的唯一可见证据（dongle 侧每次发版递增）。
+                        uint vHdr, vBuild;
+                        int vr = DongleSelfOta.QuerySelfVersion(_dongle, DongleLink.CommandTimeoutMs,
+                                                                out vHdr, out vBuild, out err);
+                        if (vr == 1)
+                            UiLog(string.Format(
+                                "运行 dongle 固件 build 0x{0:X8}（bin 头版本 0x{1:X8}）——升级后重连，build 变化即为成功",
+                                vBuild, vHdr), 3);
+                        return;
+                    }
+
+                    // 打开了 HID 句柄但 0x50 没得到 OK。dongle 半死（EP0 卡死无响应）与
+                    // 固件过旧都会走到这里：给可操作的指引，而不是只让人升级固件。
+                    UiLog("连接检查失败：Dongle 无响应（" + (err ?? "status 异常") +
+                          "）。反复出现时给 Dongle 断电重插；若 dongle 固件早于 2026-10-20 也无此命令", 1);
+                    SafeConnectUi("Dongle 无响应（详见日志）");
+                });
             }
             catch (Exception ex)
             {
+                _btnUsbConnect.Enabled = true;
                 LogLine("连接 Dongle 异常：" + ex.Message, UiTheme.Danger);
             }
+        }
+
+        /// <summary>后台连接线程回 UI：更新状态栏并恢复按钮（BeginInvoke 防跨线程）。</summary>
+        private void SafeConnectUi(string stateText)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    _btnUsbConnect.Enabled = true;
+                    _lblUsbState.Text = stateText;
+                }));
+            }
+            catch (Exception) { }
         }
 
         // ---------- USB Dongle 通道：鼠标固件版本号（DevInf 经 dongle 中继）----------
@@ -536,22 +581,32 @@ namespace BibooUxTool
 
             byte[] raw;
             string err;
+            // 2026-10-22：本方法现在由后台连接线程调用，UI 更新一律走 UiLog/BeginInvoke。
             int r = _dongle.ReadDevInfo(DongleLink.CommandTimeoutMs, out raw, out err);
             if (r != 1)
             {
-                LogLine("读取鼠标版本号失败：" + (err ?? "未知") + "（不影响 OTA 升级）", UiTheme.Warn);
+                UiLog("读取鼠标版本号失败：" + (err ?? "未知") + "（不影响 OTA 升级）", 1);
                 return;
             }
 
             var di = BleDevInf.Parse(raw);
             if (di == null)
             {
-                LogLine("DevInf 长度异常：" + raw.Length + " 字节", UiTheme.Warn);
+                UiLog("DevInf 长度异常：" + raw.Length + " 字节", 1);
                 return;
             }
 
-            _lblUsbState.Text = "已连接 Dongle（OTA 流管道就绪） · 鼠标固件 " + di.FwText;
-            LogLine("GATT（经 Dongle 中继）读回鼠标固件版本：" + di.FwText, UiTheme.Success);
+            if (IsDisposed || !IsHandleCreated)
+                return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    _lblUsbState.Text = "已连接 Dongle（OTA 流管道就绪） · 鼠标固件 " + di.FwText;
+                    LogLine("GATT（经 Dongle 中继）读回鼠标固件版本：" + di.FwText, UiTheme.Success);
+                }));
+            }
+            catch (Exception) { }
         }
 
         // ---------- 通道：BLE 直连（配对逻辑对齐「蓝牙连接」页 BleScannerForm）----------
@@ -1133,7 +1188,7 @@ namespace BibooUxTool
             }
         }
 
-        // ---------- Dongle 自身升级（host link 0x60..0x65）----------
+        // ---------- Dongle 自身升级（host link 0x70..0x75）----------
 
         /// <summary>
         /// 入口：校验前置条件后把「上传+校验」丢到后台线程。
@@ -1184,9 +1239,14 @@ namespace BibooUxTool
 
                 int r = DongleSelfOta.Upload(_dongle, _fw.Raw, DongleSelfOta.DefaultPaceMs,
                                              SelfProgress, UiLog, ct);
-                if (r != 0)
+                // 2026-10-22：Upload 约定 1=校验通过（可 COMMIT）；0=取消；-1=失败。
+                // 原先写成 if (r != 0) 把 1 也拦截了——校验通过后直接打「升级完成」返回，
+                // 下面的 AskCommit/Commit 成了死代码，COMMIT 从未发出、dongle 永不重启
+                // （11:57/12:00 两次实测：校验通过 7ms 后即「完成」，第二次升级 run 仍是 0x00000）。
+                // 只有 r <= 0（取消/失败）才收尾返回；r == 1 继续走确认+COMMIT。
+                if (r <= 0)
                 {
-                    UiSelfFinished(r == 1);
+                    UiSelfFinished(false);
                     return;
                 }
 
@@ -1223,8 +1283,9 @@ namespace BibooUxTool
                 {
                     var dr = MessageBox.Show(this,
                         "新固件已写入备用 bank 并通过 CRC32 校验。\n\n" +
-                        "点【是】将作废旧固件并重启 Dongle——这一步不可逆，\n" +
-                        "重启后若新固件有问题，只能用 Telink 烧录器救。\n\n" +
+                        "点【是】后 Dongle 会把新固件覆盖写入运行区并自动重启\n" +
+                        "（约 20 秒）——写入期间严禁拔插或断电，中断即变砖，\n" +
+                        "只能用 Telink 烧录器救。写入完成自动从新固件启动。\n\n" +
                         "点【否】保持现状：Dongle 继续跑当前固件，新镜像留在备用 bank。",
                         "切换 Dongle 固件（不可逆）",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
@@ -1274,19 +1335,25 @@ namespace BibooUxTool
                     _btnStop.Enabled = false;
                     if (ok)
                     {
-                        _lblProg.Text = "已切换：Dongle 正在重启到新固件";
-                        // 旧连接随重启消失，主动断开让 UI 回到「未连接」，避免拿着失效句柄
+                        _lblProg.Text = "已提交：Dongle 正在覆盖运行区（约 20s，勿断电）";
+                        // 旧连接随覆盖写入消失，主动断开让 UI 回到「未连接」，避免拿着失效句柄
                         try
                         {
                             if (_dongle != null)
                             {
                                 _dongle.Disconnect();
-                                _lblUsbState.Text = "Dongle 已重启，请重新插拔后连接";
+                                _lblUsbState.Text = "Dongle 正在写入新固件，等它自动重启回来…";
                             }
                         }
                         catch (Exception) { }
-                        LogLine("Dongle 自身升级完成。请拔下再插上 Dongle（新固件会重新枚举 USB），" +
-                                "然后重新点【连接 Dongle】。", UiTheme.Success);
+                        // 2026-10-22：原地覆盖 COMMIT 后 dongle 会断开 USB、覆盖运行区、复位重启。
+                        // PC 不会自动重连，日志静止 ≠ dongle 死了——上一轮用户就盯着静止日志
+                        // 误判成「没重启」。这里禁用手动连接，开后台探测：USB 重新枚举时自动
+                        // 接管连接、读 0x76 build 号并报告升级结果。
+                        _btnUsbConnect.Enabled = false;
+                        LogLine("COMMIT 已执行：Dongle 正在把新固件覆盖写入运行区（约 20 秒）。" +
+                                "写入期间请勿拔插断电；完成后会自动重新连接并验证固件版本，无需手动操作。", UiTheme.Success);
+                        StartRebootWatch();
                     }
                     else
                     {
@@ -1295,6 +1362,68 @@ namespace BibooUxTool
                 }));
             }
             catch (Exception) { }
+        }
+
+        /// <summary>COMMIT 后台等待：dongle 覆盖 + 复位后 USB 重新枚举，自动探测、自动
+        /// 接管连接并读 0x76 build 号，把「升级是否真的落地 + 自动重启是否发生」直接
+        /// 报告到日志。等待期手动连接按钮被禁用，避免与探测竞态。</summary>
+        private void StartRebootWatch()
+        {
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 75000)
+                {
+                    System.Threading.Thread.Sleep(2500);
+                    if (IsDisposed || IsHandleCreated == false)
+                        return;
+                    var probe = new DongleLink();
+                    string perr = probe.Connect();
+                    if (perr != null)
+                        continue;                       //USB 还没回来（枚举不到），继续等
+
+                    //USB 回来了：读 0x76 确认正在跑的固件，然后把这条连接交给 UI。
+                    uint vHdr, vBuild;
+                    int vr = DongleSelfOta.QuerySelfVersion(probe, DongleLink.CommandTimeoutMs,
+                                                            out vHdr, out vBuild, out perr);
+                    int waited = (int)sw.ElapsedMilliseconds / 1000;
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (IsDisposed)
+                        {
+                            try { probe.Disconnect(); } catch (Exception) { }
+                            return;
+                        }
+                        if (_dongle != null && _dongle != probe)
+                        {
+                            try { _dongle.Disconnect(); } catch (Exception) { }
+                        }
+                        _dongle = probe;
+                        if (vr == 1)
+                            UiLog(string.Format(
+                                "Dongle 已自动重启回来（等待 {0}s），运行 build 0x{1:X8}（bin 头版本 0x{2:X8}）" +
+                                "——USB 断开又自动回来 = 覆盖 + 复位成功，自动重启打通！", waited, vBuild, vHdr),
+                                3);
+                        else
+                            UiLog("Dongle 已自动重启回来（等待 " + waited + "s）——自动重启打通！" +
+                                  "（0x76 版本查询未应答：" + (perr ?? "无响应") + "）", 3);
+                        SafeConnectUi("已连接 Dongle（升级完成，自动重连）");
+                        _btnUsbConnect.Enabled = true;
+                    }));
+                    return;
+                }
+                //超时：覆盖阶段被中断或 dongle 半死，交还给用户处理
+                BeginInvoke(new Action(() =>
+                {
+                    if (IsDisposed)
+                        return;
+                    _btnUsbConnect.Enabled = true;
+                    _lblUsbState.Text = "未等到 Dongle 重启";
+                    UiLog("75 秒内未等到 Dongle 的 USB 重新枚举。请拔插一次再点【连接 Dongle】；" +
+                          "若拔插后设备管理器里也没有 2657:5862，说明覆盖写入被中断，需用 Telink 烧录器恢复。",
+                          2);
+                }));
+            });
         }
 
         // ---------- 后台事件 → UI ----------

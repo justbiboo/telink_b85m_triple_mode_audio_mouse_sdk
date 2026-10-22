@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <windows.h>			/*GetLastError - hidapi 失败时经常不设错误串，Win32 错误码才是关键线索*/
 #include "BibooHid.h"
 #include "hidapi.h"
 
@@ -109,8 +110,14 @@ extern "C" BIBOO_API int bh_send(void* h, const unsigned char* payload, int payl
 	memcpy(&buf[1], payload, n);
 	res = hid_send_feature_report(link->device, buf, sizeof(buf));
 	if (res < 0) {
+		/*hidapi 的 per-device 错误串在 HidD_SetFeature 失败时经常是空的，
+		 *必须立刻抓线程的 Win32 GetLastError（先取后格式化，避免被其他
+		 *调用覆盖）。常见码：121=ERROR_SEM_TIMEOUT（控制传输超时 -> EP0
+		 *被卡死的特征，设备还在总线上）；1167=ERROR_DEVICE_NOT_CONNECTED
+		 *（设备已消失/被重新枚举）；31=ERROR_GEN_FAILURE。*/
 		const wchar_t* e = hid_error(link->device);
-		set_err("hid_send_feature_report failed (%ls)", e ? e : L"");
+		DWORD gle = GetLastError();
+		set_err("hid_send_feature_report failed (%ls, gle=%lu)", e ? e : L"", (unsigned long)gle);
 		return -1;
 	}
 	return 0;

@@ -43,6 +43,136 @@ namespace BibooUxTool
         public const byte MstatGroup1 = 1;           // → tx_ok / epq / fifo_drop
         public const byte MstatReset = 0xFF;         // 清零全部计数器
 
+        // ===== OTA 透传流管道命令（镜像固件 ux_ota_slot.h，2026-10-20 重写）=====
+        // 流程：PC 经 USB 把固件字节流灌进 dongle（BEGIN/DATA/END），dongle 不落 flash，
+        // 而是由 Telink master OTA 框架（blm_ota.c proc_ota）实时组 20B PDU、
+        // 通过它到鼠标的 BLE 链路推给鼠标；鼠标固件零改动。
+        // BEGIN 即启动推包（连接间隔切 10ms + OTA 特征发现 + START），无 TRIGGER
+        // （0x53 已随落盘方案一起废除）。命令字 0x50..0x52/0x54 与 FT 的 0x10..0x15/0x40 不重叠。
+        public const byte CmdOtaSlotBegin = 0x50;    // args[0..3] = 固件总字节 u32 LE（1..128K）
+        public const byte CmdOtaSlotData = 0x51;     // args[0] = len 1..12，args[1..12] = data
+        public const byte CmdOtaSlotEnd = 0x52;      // rsp data[0..3] = 已收字节数 u32 LE
+        public const byte CmdOtaStatus = 0x54;       // rsp data = 12B 快照（见下）
+
+        // ===== 0x55 GET_DEV_INFO：鼠标 DevInf_aaa 中继（2026-10-21 新增）=====
+        // dongle 是鼠标的 BLE master，连上鼠标后自己读 OTA 服务下的只读特征 DevInf_aaa
+        // （句柄 0x0010，无需配对/加密）并缓存；PC 的 BLE 链路被 dongle 占着，只能由它中继。
+        // 15B 放不进一帧（r[3..14] 只有 12B），故 args[0]=字节偏移，分两帧取回（0 与 12）。
+        public const byte CmdDevInfo = 0x55;          // args[0]=偏移 → rsp data = 12B 分片
+        public const int DevInfoTotal = 15;           // DevInf_aaa 总长
+        public const int DevInfoChunk = 12;           // 每帧有效数据（r[3..14]）
+        public const byte DevInfoStOk = 0;
+        public const byte DevInfoStNotReady = 1;      // 鼠标未连上 dongle / 尚未读到
+        public const byte DevInfoStBadOffset = 2;
+
+        // ===== 0x70..0x75 dongle 自身升级（2026-10-21 重编号，镜像 ux_self_ota.h）=====
+        // 与鼠标 OTA（0x50..0x54，镜像流过 dongle 不落 flash）相反：这里的镜像就是
+        // dongle 自己的固件，写进它 flash 的另一个 A/B bank（运行在 0x00000，
+        // 新镜像写 0x20000）。COMMIT 之前运行中的固件一根字节都没被碰过，
+        // 失败/中断的上传不会让 dongle 变砖；COMMIT 才作废旧 bank 并重启。
+        // 2026-10-21 字段死锁根因：首版用 0x60..0x65，而响应 = cmd|0x80 =
+        // 0xE0..0xE5，其中 DATA/END/STATUS 的 ACK（0xE1/0xE2/0xE3）与上行事件
+        // EvtMouse/EvtDutLink/EvtFwdRsp 逐字节相撞——Pump 把每个 ACK 当事件丢弃，
+        // 第一帧 DATA 就超时（dongle 侧 rx_ok 恒为 1、STATUS 永不匹配，最后
+        // 20s 空闲看门狗把会话杀掉）。重编号到 0x70..0x75（响应 0xF0..0xF5）
+        // 后与事件区彻底错开。新旧固件/工具必须成对升级：旧 dongle 对 0x74
+        // INFO 只会回 echo，QueryBankInfo 超时报「固件过旧」，属预期拦截。
+        public const byte CmdSelfBegin = 0x70;      // args[0..3] = 镜像总字节 u32 LE
+        public const byte CmdSelfData = 0x71;       // args[0] = len 1..12，args[1..12] = data
+        public const byte CmdSelfEnd = 0x72;        // rsp data[0] = SelfRes*（校验结果）
+        public const byte CmdSelfStatus = 0x73;     // rsp data = 12B 会话快照（见下）
+        public const byte CmdSelfInfo = 0x74;       // rsp data = 12B bank 布局（见下）
+        public const byte CmdSelfCommit = 0x75;     // 覆盖写入运行区 + 自动重启（不可逆）
+        public const byte CmdSelfVersion = 0x76;    // 查运行固件版本（8B：bin 头版本 + build 号）
+
+        // SELF_VERSION 响应数据布局（相对 UlOffsData，8B）——与 dongle ux_self_ota.h 对齐：
+        // 原地覆盖 COMMIT 下运行 bank 恒为 0x00000、bin 头版本常为 0，build 号是
+        // 升级是否真正落地的唯一可见证据（dongle 侧每次发版手动递增）。
+        public const int SelfVerOffsHdr = 0;        // 运行 bank 镜像头 0x02 处的版本 u32 LE
+        public const int SelfVerOffsBuild = 4;      // dongle 编译期 build 号 u32 LE
+
+        // SELF_DATA 载荷布局（相对 DlOffsArgs）——与 dongle ux_self_ota.h 对齐：
+        //   args[0..3] = 字节偏移 u32 LE（镜像内绝对偏移，使每帧幂等）
+        //   args[4]    = 本帧数据长度 1..SelfDataMax
+        //   args[5.. ] = 数据
+        public const int SelfDataOffsOff = 0;       // u32 LE 字节偏移
+        public const int SelfDataOffsLen = 4;       // 1..8
+        public const int SelfDataOffsData = 5;
+        public const int SelfDataMax = 8;           // 4 + 1 + 8 = 13 = args 区
+
+        // SELF_INFO 响应数据布局（相对 UlOffsData，数据区共 12B）
+        // 注意：第 4 个 u32 放不进 12B 数据区，max image 不上线——
+        // 它是构建常量（ota_firmware_max_size），PC 侧用 SelfImageMax 镜像。
+        public const int SelfInfoOffsRun = 0;       // 正在运行的 bank 偏移 u32 LE（0 或 0x20000）
+        public const int SelfInfoOffsOta = 4;       // 升级目标 bank 偏移 u32 LE
+        public const int SelfInfoOffsBoot = 8;      // ota_program_bootAddr u32 LE（== 单 bank 大小）
+
+        // SELF_STATUS 响应数据布局（相对 UlOffsData，用 10B / 共 12B）
+        // CRC32 不在这里（2+4+4+4 > 12）：校验通过后由 END 响应的 result 告知，
+        // dongle UART 日志里有实算 CRC 可查。
+        public const int SelfStsOffsState = 0;      // 会话状态 SelfSt*
+        public const int SelfStsOffsResult = 1;     // 校验/提交结果 SelfRes*
+        public const int SelfStsOffsRecv = 2;       // 已收字节 u32 LE
+        public const int SelfStsOffsTotal = 6;      // BEGIN 宣告的镜像大小 u32 LE
+
+        // 会话状态（SelfStsOffsState）
+        public const byte SelfStIdle = 0;           // 无会话
+        public const byte SelfStRecv = 1;           // BEGIN 成功，正在收 DATA
+        public const byte SelfStVerify = 2;         // END 已到，正在校验
+        public const byte SelfStReady = 3;          // 校验通过，等待 COMMIT
+        public const byte SelfStFail = 4;           // 校验失败，会话作废
+        public const byte SelfStCommit = 5;         // COMMIT 已接受，随即重启
+
+        // 校验 / 提交结果（SelfStsOffsResult）
+        public const byte SelfResNone = 0;          // 尚无结果
+        public const byte SelfResOk = 1;            // 校验通过 / 已提交
+        public const byte SelfResSize = 2;          // 实收字节数与宣告不符
+        public const byte SelfResMagic = 3;         // 新 bank 0x08 处没有 "KNLT"
+        public const byte SelfResHdr = 4;           // 0x18 处 size 字段与宣告不符
+        public const byte SelfResCrc = 5;           // CRC32 不符
+
+        // BEGIN 响应 data[0]（仅 status=ERR 时有效）
+        public const byte SelfBeginErrBank = 2;     // 无法判定运行 bank（拒绝执行，防呆）
+        public const byte SelfBeginErrSize = 3;     // 镜像大小越界
+        public const byte SelfBeginErrFlash = 4;    // flash 容量不足以容纳第二个 bank
+
+        // BEGIN 响应 data[0]（仅 status=BUSY 时有效）
+        public const byte SelfBeginBusySession = 5; // 已有会话在进行
+
+        // 单 bank 最大镜像（dongle 侧 UX_SOTA_IMAGE_MAX == ota_firmware_max_size）
+        public const int SelfImageMax = 0x1F000;    // 124K
+
+        // SLOT_DATA 载荷布局（相对 DlOffsArgs）
+        public const int OtaDataOffsLen = 0;         // 1..12
+        public const int OtaDataOffsData = 1;
+        public const int OtaDataMax = 12;            // 15B 帧预算：13 args - 1 len 字节
+
+        // OTA STATUS 响应数据布局（相对 UlOffsData，共 12B）
+        public const int OtaStsOffsState = 0;        // 流管道状态机 OtaSt*
+        public const int OtaStsOffsMasterCmd = 1;    // master_ota_cmd（blm_ota.c）
+        public const int OtaStsOffsStart = 2;        // host_ota_start（master OTA 步骤）
+        public const int OtaStsOffsAdr = 3;          // ota_adr u32 LE：已推给鼠标的字节数
+        public const int OtaStsOffsSize = 7;         // n_firmware u32 LE：本次镜像大小
+        public const int OtaStsOffsResult = 11;      // master OTA 结果 OtaRes*
+
+        // 流管道状态（OtaStsOffsState）
+        public const byte OtaStIdle = 0;             // 无会话
+        public const byte OtaStStream = 1;           // PC 灌入中 / dongle 推包中
+        public const byte OtaStFinish = 2;           // SLOT_END 已到，正在推尾包
+
+        // master OTA 结果（OtaStsOffsResult）
+        public const byte OtaResNone = 0;            // 未运行 / 运行中
+        public const byte OtaResOk = 1;              // 成功（鼠标随即重启，可能自动关机）
+        public const byte OtaResFail = 2;            // 失败（链路中断/超时/设备拒绝）
+
+        // SLOT_BEGIN 响应 data[0]（仅 status=ERR 时有效）：2 = 鼠标未连接 dongle
+        // （dongle 与鼠标的 BLE 链路就是推包通路，PC 直连不算）
+        public const byte OtaBeginDutNotConnected = 2;
+
+        // SLOT_BEGIN 响应 data[0]（仅 status=BUSY 时有效）：3 = master OTA 推包进行中
+        // （此时开新镜像会破坏推包；等它出结果或给 dongle 断电重启）
+        public const byte OtaBeginBusyOtaPush = 3;
+
         // STATUS 响应数据（相对 UlOffsData）
         public const int StsOffsActive = 0;    // 1 = 产测模式激活
         public const int StsOffsDutLink = 1;   // 1 = DUT 已连接
@@ -200,6 +330,37 @@ namespace BibooUxTool
         private static uint Le32(byte[] f, int o)
         {
             return (uint)(f[o] | (f[o + 1] << 8) | (f[o + 2] << 16) | (f[o + 3] << 24));
+        }
+
+        /// <summary>OTA STATUS 快照（0x54 响应，15B 上行帧）。</summary>
+        internal sealed class OtaStatusSnapshot
+        {
+            public byte State;        // OtaSt*
+            public byte MasterCmd;    // master_ota_cmd
+            public byte Start;        // host_ota_start
+            public uint Adr;          // 已推给鼠标的字节数
+            public uint Size;         // slot 内镜像大小
+            public byte Result;       // OtaRes*
+        }
+
+        /// <summary>解析 OTA STATUS 响应。返回 false 表示帧格式不符。</summary>
+        public static bool ParseOtaStatus(byte[] frame, out OtaStatusSnapshot snap)
+        {
+            snap = null;
+            if (frame == null || frame.Length < HlinkSize)
+                return false;
+            if (frame[UlOffsCmd] != (byte)(CmdOtaStatus | RspMask))
+                return false;
+
+            snap = new OtaStatusSnapshot();
+            int d = UlOffsData;
+            snap.State     = frame[d + OtaStsOffsState];
+            snap.MasterCmd = frame[d + OtaStsOffsMasterCmd];
+            snap.Start     = frame[d + OtaStsOffsStart];
+            snap.Adr       = Le32(frame, d + OtaStsOffsAdr);
+            snap.Size      = Le32(frame, d + OtaStsOffsSize);
+            snap.Result    = frame[d + OtaStsOffsResult];
+            return true;
         }
     }
 

@@ -1118,7 +1118,7 @@ namespace BibooUxTool
             var dev = ResolvePttDevice();
             if (dev == null)
             {
-                LogLine("自动录音：没有可用的录音设备（dongle 的 USB Audio 是否已插好/装好驱动）。", UiTheme.Warn);
+                LogLine("自动录音：没有可用的录音设备（Dongle 的 USB Audio 是否已插好/装好驱动）。", UiTheme.Warn);
                 return;
             }
 
