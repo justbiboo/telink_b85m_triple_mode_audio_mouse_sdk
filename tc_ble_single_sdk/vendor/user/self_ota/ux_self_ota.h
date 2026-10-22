@@ -127,10 +127,19 @@
  *        ([id]+15B), was 15B - dropped the last payload byte of every
  *        frame (first victim: KNLT magic at image 0x08).
  * 0x65 = tighten the master OTA push pacing 4ms -> 2.5ms/PDU (blm_ota.c
- *        OTA_PUSH_MIN_GAP_US): transparent mouse OTA ~25s -> ~13s; keep
- *        only if the mouse verifies clean with no packet loss, else
- *        back off to 3000. */
-#define UX_SOTA_SELF_BUILD      0x00000065u
+ *        OTA_PUSH_MIN_GAP_US): transparent mouse OTA ~25s -> ~19.7s;
+ *        mouse verifies clean, no packet loss.
+ * 0x66 = OTA-session connection interval 8 -> 6 (10ms -> 7.5ms,
+ *        blm_ota.c proc_ota step 1): +33% connection events; measured
+ *        18.8s (2.0 PDU/event unchanged - the wall was the mainloop
+ *        tick, not the link).
+ * 0x67 = batch push engine (blm_ota.c step 6): up to 3 PDUs per
+ *        mainloop pass, pass gate widened to 3x2.5ms = 7.5ms - rate
+ *        decoupled from the loop tick, long-rate floor 400 PDU/s,
+ *        at most 3 PDUs in any 7.5ms window (mouse ATT RX safe
+ *        bound); fifo<5 gate self-throttles if the LL pops fewer
+ *        per event. Expect ~18.8s -> ~12.4s. */
+#define UX_SOTA_SELF_BUILD      0x00000067u
 
 /* DATA payload layout v2 (relative to the frame args offset, 13-byte args
  * area; v2 2026-10-22 - no compat kept, PC and firmware ship in lockstep):

@@ -285,7 +285,7 @@ void proc_ota (void)
 	{
 
 		if(blc_ll_getCurrentState() == BLS_LINK_STATE_CONN){  //still in connection state
-			//10ms interval,  latency = 0   timeout = 6S
+			//7.5ms interval,  latency = 0   timeout = 6S
 			/*BIBOO UX 2026-10-20 (field log 21:17): was timeout=200 (2S).
 			 *The dongle-mouse link ALREADY runs at interval 8 (10ms), so
 			 *this update gains nothing on speed - it only used to HALVE the
@@ -297,10 +297,17 @@ void proc_ota (void)
 			 *mouse's own preferred supervision timeout is 6S (its GAP conn
 			 *params) and the PC-direct OTA channel runs at that value with
 			 *no drops - match it here. If the mouse rejects the update the
-			 *step-1 1.5s fallback advances anyway. */
+			 *step-1 1.5s fallback advances anyway.
+			 *2026-10-22: interval 8 -> 6 (10ms -> 7.5ms). With the 2.5ms
+			 *push pacing the engine tops out at 2 PDUs per 10ms event
+			 *(4045 B/s measured); 7.5ms adds +33% events WITHOUT raising
+			 *the per-event PDU ceiling (pacing allows at most 3 per 7.5ms
+			 *event vs 4 per 10ms), so the mouse's ATT RX pressure does not
+			 *increase. Rejected update = safe fallback to 10ms via the
+			 *step-1 fallback above. */
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
 			blm_ll_updateConnection (cur_conn_device.conn_handle,
-										8, 8, 0,  600,
+										6, 6, 0,  600,
 											  0, 0 );
 #else
 			blm_ll_updateConnection (cur_conn_device.conn_handle,
@@ -590,15 +597,18 @@ void proc_ota (void)
 		 *silently - no error anywhere, just a hole in adr_index ->
 		 *OTA_PACKET_LOSS(1). Note this is NOT part of `allow` on purpose:
 		 *pacing must not look like a gate stall to the watchdog below.
-		 *2026-10-22 tightened 4000->2500us: with the 10ms connection interval
-		 *this allows up to 4 PDUs per event (inside the txFifo<5 gate),
-		 *pushing the 4980-PDU image from ~25s to ~13s. Validation bar: the
-		 *transparent push must finish with NO OTA_PACKET_LOSS and a clean
-		 *verify; if the mouse drops packets, back off to 3000. (2026-10-21
-		 *note about matching OtaForm's 4ms is historical - the fast path is
-		 *what made this pace revisit.)*/
+		 *2026-10-22 tightened 4000->2500us: measured 19.7s with zero loss
+		 *at 10ms interval, but the engine still topped out at 2 PDUs per
+		 *event - the wall was the mainloop tick, not the link.
+		 *2026-10-22 batch mode: push up to OTA_PUSH_BURST PDUs per pass and
+		 *widen the pass gate to BURST*MIN_GAP (7.5ms), decoupling the rate
+		 *from the loop tick: LONG-rate floor stays 400 PDU/s, i.e. at most
+		 *3 PDUs inside any 7.5ms window - the per-event ceiling the pacing
+		 *era argued safe for the mouse's ATT RX queue. If the mouse drops
+		 *packets at 3/event (verify fails), halve OTA_PUSH_BURST to 2.*/
 		static u32 ota_pace_tick = 0;
 		#define OTA_PUSH_MIN_GAP_US		2500
+		#define OTA_PUSH_BURST			3	/*PDUs per pass; pass gate = BURST*MIN_GAP*/
 
 		/*"ready" (not "pending >= 16"): the short tail block needs only the
 		 *last 4 bytes and no further PC frame will arrive, so the old gate
@@ -608,8 +618,10 @@ void proc_ota (void)
 		u8 allow   = !blm_ll_isRfStateMachineBusy() && blc_ll_getTxFifoNumber() < 5;
 		/*stream mode only: the legacy flash-slot path never arms ota_pace_tick
 		 *and must not be throttled by a stale value from a previous session*/
+		u8 burst;
 		u8 paced   = (ota_stream_total &&
-					  !clock_time_exceed(ota_pace_tick, OTA_PUSH_MIN_GAP_US)) ? 1 : 0;
+					  !clock_time_exceed(ota_pace_tick,
+										 OTA_PUSH_BURST * OTA_PUSH_MIN_GAP_US)) ? 1 : 0;
 
 		if (pending && !allow)
 		{
@@ -641,10 +653,21 @@ void proc_ota (void)
 		if( !blm_ll_isRfStateMachineBusy() && blc_ll_getTxFifoNumber() < 5 )
 #endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 		{
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+			for(burst = 0; burst < OTA_PUSH_BURST; burst++)
+			{
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 				u8 ota_buffer[20];
 				rf_packet_att_ota_data_t *p = (rf_packet_att_ota_data_t *)ota_buffer;
+				int nlen;
 
-				int nlen = ota_adr < n_firmware ? 16 : 0;
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+				if(blc_ll_getTxFifoNumber() >= 5){
+					break;	/*shallow-queue guard: LL drains per event, next pass re-fills*/
+				}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+
+				nlen = ota_adr < n_firmware ? 16 : 0;
 
 				p->adr_index = ota_adr>>4;
 
@@ -663,19 +686,27 @@ void proc_ota (void)
 							ux_ota_stream_commit();	//consume the staged block
 							ota_adr += 16;  //next data index
 							ota_lastData_tick = clock_time();
-							ota_pace_tick = clock_time();	//4ms inter-PDU budget
 						}
 						/*else: link congested. Do NOT commit - the next
 						 *iteration re-pushes these exact bytes with the same
 						 *adr_index. Dropping them here shifted every later
 						 *block one slot and made the mouse answer
-						 *OTA_FW_CHECK_ERR(6). */
+						 *OTA_FW_CHECK_ERR(6). 2026-10-22: also stop the burst
+						 *here - a rejected push means the queue is full and the
+						 *remaining slots would only pile on.*/
+						else{
+							break;
+						}
 					}
 					/*else: fifo dry. Only finish when the PC closed the
 					 *stream (SLOT_END + everything pushed) - a dry fifo
 					 *mid-transfer just means "wait for the next frame". */
 					else if(ux_ota_stream_eof()){
 						host_ota_start = 7;  //all stream data OK, to next step
+						break;
+					}
+					else{
+						break;	/*mid-transfer dry: wait for the next PC frame*/
 					}
 				}
 				else
@@ -689,13 +720,28 @@ void proc_ota (void)
 						ota_adr += 16;  //next data index
 						ota_lastData_tick = clock_time();
 					}
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+					else{
+						break;	/*queue full: retry next pass*/
+					}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 				}
 
 			}
 				else{
 					host_ota_start = 7;  //all ota data OK, to next step
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+					break;
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 				}
 
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+			}	/*for(burst)*/
+
+			if(burst){
+				ota_pace_tick = clock_time();	/*re-arm the pass budget from the LAST push*/
+			}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 		}
 	}
 	else if(host_ota_start == 7)
