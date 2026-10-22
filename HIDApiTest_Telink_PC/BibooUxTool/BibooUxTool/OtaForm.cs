@@ -39,7 +39,6 @@ namespace BibooUxTool
         private Panel _pnlUsb;
         private Panel _pnlBle;
         private Button _btnUsbConnect;
-        private Button _btnSelfInfo;    // 查询 A/B bank 布局（0x74，只读）
         private Label _lblUsbState;
         private Button _btnBleConnect;
         private ListBox _lstBle;
@@ -60,6 +59,9 @@ namespace BibooUxTool
         private bool _uiBleConnected;            // UI 口径的连接态（只由 ATT 活性校验给出）
         private bool _bleBusyConnect;            // 连接进行中（防重入）
         private int _bleVerifyBusy;
+        private int _bleFwProbeBusy;             // 回连后补读固件版本（防重入）
+        private bool _bleLinkDropped;            // 断开过链路（回连时强制重读固件版本）
+        private int _bleFwProbeTries;            // 回连补读已尝试次数（防无 DevInf 固件时无限重试）
         // OTA 传输进行中：此时必须停掉 2.5s 的 ATT 活性巡检。
         // 原因：设备正在写 flash，对 Device Name 的读请求常被拖到 1200ms 超时，
         // 巡检会误判「链路不可达」→ ReleaseDevice → 正在进行的写全部 E_ABORT，升级被自己掐断。
@@ -156,15 +158,15 @@ namespace BibooUxTool
             _radUsb = new RadioButton();
             _radUsb.Text = "USB Dongle";
             _radUsb.ForeColor = UiTheme.TextMain;
-            _radUsb.SetBounds(16, 34, 190, 20);
+            _radUsb.SetBounds(214, 34, 190, 20);
             _radUsb.Checked = true;
             _radUsb.CheckedChanged += (s, e) => SyncChannelPanels();
             cardCh.Controls.Add(_radUsb);
 
             _radSelf = new RadioButton();
-            _radSelf.Text = "Dongle 自身";
+            _radSelf.Text = "Dongle Self";
             _radSelf.ForeColor = UiTheme.TextMain;
-            _radSelf.SetBounds(214, 34, 200, 20);
+            _radSelf.SetBounds(16, 34, 200, 20);
             _radSelf.CheckedChanged += (s, e) => SyncChannelPanels();
             cardCh.Controls.Add(_radSelf);
 
@@ -182,11 +184,6 @@ namespace BibooUxTool
 
             _btnUsbConnect = MakeButton("连接 Dongle", 0, 8, 110, 28, true, OnUsbConnect);
             _pnlUsb.Controls.Add(_btnUsbConnect);
-
-            // 「查询 Bank」只在「Dongle 自身」通道出现：读一次 0x74，把 A/B 布局打到日志
-            _btnSelfInfo = MakeButton("查询 Bank", 116, 8, 96, 28, false, OnSelfInfo);
-            _btnSelfInfo.Visible = false;
-            _pnlUsb.Controls.Add(_btnSelfInfo);
 
             _lblUsbState = new Label();
             _lblUsbState.Text = "未连接";
@@ -245,16 +242,6 @@ namespace BibooUxTool
             _btnBleDisconnect.Anchor = AnchorStyles.Top | AnchorStyles.Right;
             _pnlBle.Controls.Add(_btnBleDisconnect);
 
-            var lblBleNote = new Label();
-            lblBleNote.Text = "OTA 特征 = TELINK_SPP_DATA_OTA（128-bit，12 2B 0D…，WRITE_WITHOUT_RSP），"
-                            + "固件 BLE_OTA_SERVER_ENABLE=1 时存在。\r\n已配对设备由系统建链，本页只负责等链 + 接入 + "
-                            + "ATT 活性校验（校验不过一律按未连接，不给假连接）。";
-            lblBleNote.ForeColor = UiTheme.TextSub;
-            lblBleNote.SetBounds(582, 36, 278, 110);
-            lblBleNote.AutoSize = false;
-            lblBleNote.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            lblBleNote.TextAlign = ContentAlignment.TopLeft;
-            _pnlBle.Controls.Add(lblBleNote);
             cardCh.Controls.Add(_pnlBle);
 
             _ble.DeviceDiscovered += OnBleDiscovered;
@@ -331,7 +318,7 @@ namespace BibooUxTool
             LogLine("OTA 页就绪：选择固件 bin → 选通道 →【开始升级】。", UiTheme.TextSub);
             LogLine("提示：USB 通道需 Dongle 已插且鼠标已连上 Dongle；BLE 通道默认列出已配对且已连接的设备"
                     + "（与「蓝牙连接」页同一套配对逻辑），选中【连接】即可，未配对先用【系统配对】。", UiTheme.TextSub);
-            LogLine("「Dongle 自身」通道升级的是 Dongle 自己的固件：镜像写入备用 A/B bank，" +
+            LogLine("「Dongle Self」通道升级的是 Dongle 自己的固件：镜像写入备用 A/B bank，" +
                     "上传/校验阶段不影响运行中的固件，只有最后确认【切换】才不可逆。", UiTheme.TextSub);
         }
 
@@ -454,31 +441,8 @@ namespace BibooUxTool
         {
             _pnlUsb.Visible = _radUsb.Checked || _radSelf.Checked;
             _pnlBle.Visible = _radBle.Checked;
-            if (_btnSelfInfo != null)
-                _btnSelfInfo.Visible = _radSelf.Checked;
             if (_btnStart != null)
                 _btnStart.Text = _radSelf.Checked ? "升级 Dongle" : "开始升级";
-        }
-
-        /// <summary>查询 A/B bank 布局（0x74，只读无副作用），把结果打到日志。</summary>
-        private void OnSelfInfo(object sender, EventArgs e)
-        {
-            if (_dongle == null || !_dongle.IsConnected)
-            {
-                LogLine("请先【连接 Dongle】", UiTheme.Warn);
-                return;
-            }
-            DongleBankInfo bi;
-            string err;
-            int r = DongleSelfOta.QueryBankInfo(_dongle, DongleLink.CommandTimeoutMs, out bi, out err);
-            if (r != 1)
-            {
-                LogLine("查询 bank 布局失败：" + (err ?? "无响应"), UiTheme.Danger);
-                return;
-            }
-            LogLine(string.Format("A/B bank 布局：正在运行 {0}，新镜像将写入 {1}，单 bank {2} 字节，镜像上限 {3} 字节",
-                bi.RunBankText, bi.OtaBankText, bi.BankSize, bi.MaxImage), UiTheme.Success);
-            LogLine("COMMIT 之前运行中的固件不会被修改；失败或拔线都可直接重新开始。", UiTheme.TextSub);
         }
 
         private void OnUsbConnect(object sender, EventArgs e)
@@ -939,6 +903,8 @@ namespace BibooUxTool
             {
                 BeginInvoke(new Action(() =>
                 {
+                    if (!up)
+                        _bleLinkDropped = true;   // 断开过：回连后必须重读固件版本
                     UpdateBleConnUi(up);
                     if (!up && _otaRunning)
                     {
@@ -950,6 +916,8 @@ namespace BibooUxTool
                         LogLine("BLE 连接状态：" + (up ? "已连接（往返校验通过）" : "已断开"),
                             up ? UiTheme.Success : UiTheme.Warn);
                     }
+                    if (up)
+                        ProbeBleFwVersionAfterReconnect();
                 }));
             }
             catch (Exception) { }
@@ -975,7 +943,15 @@ namespace BibooUxTool
                 // 后者额外要求 SPP 0x33F3/0x33F4，会让「连上但没 SPP」的设备每 2.5s 被判掉线。
                 bool up = _ble.IsOtaReady;
                 if (up == _uiBleConnected)
+                {
+                    // 常驻回连补读：断链标志还挂着（此前尝试失败）就随巡检周期再试，
+                    // 直到读到/重试上限 —— 只在状态翻转时试一次会错过 GATT 就绪窗口
+                    if (up && _bleLinkDropped && !_otaRunning)
+                        ProbeBleFwVersionAfterReconnect();
                     return;
+                }
+                if (!up)
+                    _bleLinkDropped = true;      // 巡检先发现掉线：同样标记，回连后重读版本
 
                 UpdateBleConnUi(up);
                 LogLine(up
@@ -983,6 +959,8 @@ namespace BibooUxTool
                     : "链路巡检：ATT 活性读失败 → 判定未连接。"
                       + (string.IsNullOrEmpty(_ble.LastDropReason) ? "" : "原因：" + _ble.LastDropReason),
                     up ? UiTheme.Success : UiTheme.Danger);
+                if (up)
+                    ProbeBleFwVersionAfterReconnect();
             }
             catch (Exception ex)
             {
@@ -991,6 +969,94 @@ namespace BibooUxTool
             finally
             {
                 _bleVerifyBusy = 0;
+            }
+        }
+
+        /// <summary>
+        /// 回连后补读固件版本：BLE Direct 升级中设备重启后，回连走系统链路恢复
+        /// （ConnectionChanged / 链路巡检），不经过手动【连接】的特征发现路径，
+        /// PC 侧 GATT 视图还是旧固件的（无 DevInf）——ReadDevInfoAsync 内部会先重枚举。
+        /// 断开过的链路必须重读一次：固件可能已换新，旧版本号不能再当现状显示；
+        /// 读不到（链路未就绪/固件无 DevInf）保持静默。
+        /// </summary>
+        private async void ProbeBleFwVersionAfterReconnect()
+        {
+            if (IsDisposed || Interlocked.CompareExchange(ref _bleFwProbeBusy, 1, 0) != 0)
+                return;
+            try
+            {
+                await Task.Delay(1500);          // 回连瞬间 GATT 未就绪，退一拍再读
+                /*目标条目定位：优先按连接设备的 AEP Id 精确命中已配对表 ——
+                 *升级成功后无需用户选中对应行，版本号直接刷到那一行上；
+                 *定位不到（扫描模式/Id 未命中）再退回当前选中项*/
+                string connId = _ble.ConnectedDeviceId;
+                BleDeviceInfo dev = null;
+                if (!string.IsNullOrEmpty(connId))
+                    _blePairedItems.TryGetValue(connId, out dev);
+                bool byConnId = dev != null;
+                if (dev == null)
+                    dev = _lstBle.SelectedItem as BleDeviceInfo;
+                if (dev == null)
+                {
+                    LogLine("回连补读版本跳过：无法定位设备条目（连接 Id 未命中已配对表且列表无选中项）",
+                        UiTheme.TextSub);
+                    return;
+                }
+                if (!byConnId && !string.IsNullOrEmpty(connId) && dev.DeviceId != null
+                    && dev.DeviceId != connId)
+                {
+                    LogLine("回连补读版本跳过：选中项与连接设备 Id 不一致，conn="
+                        + connId + " dev=" + dev.DeviceId, UiTheme.TextSub);
+                    return;                      // 选中项与当前连接设备不一致，别张冠李戴
+                }
+                if (byConnId)
+                {
+                    int ci = _lstBle.Items.IndexOf(dev);
+                    if (ci >= 0 && _lstBle.SelectedIndex != ci)
+                        _lstBle.SelectedIndex = ci;   // 已接入的设备默认选中：状态栏直接带出它的版本
+                }
+                bool dropped = _bleLinkDropped;  // 断开过 → 强制重读
+                if (!dropped && !string.IsNullOrEmpty(dev.FwVersion))
+                    return;                      // 没断链且已有版本（手动连接刚读过）→ 正常静默
+                if (dropped && ++_bleFwProbeTries > 4)
+                {
+                    _bleLinkDropped = false;     // 重试上限：多半是固件无 DevInf 特征，放弃
+                    _bleFwProbeTries = 0;
+                    LogLine("回连补读版本放弃（重试 4 次失败）：固件可能无 DevInf 特征", UiTheme.Warn);
+                    return;
+                }
+                BleDevInf di = await _ble.ReadDevInfoAsync(1500);
+                if (di == null)
+                {
+                    if (dropped)
+                        LogLine("回连补读版本失败（第 " + _bleFwProbeTries + "/4 次）："
+                            + (_ble.LastDevInfoNote ?? "未知原因"), UiTheme.TextSub);
+                    return;                      // 失败：标志保留，随下一轮巡检再试
+                }
+                _bleLinkDropped = false;         // 读到才清标志
+                _bleFwProbeTries = 0;
+                string old = dev.FwVersion;
+                bool changed = old != di.FwText;
+                dev.FwVersion = di.FwText;
+                int idx = _lstBle.Items.IndexOf(dev);
+                if (idx >= 0)
+                {
+                    int sel = _lstBle.SelectedIndex;  // 刷新行不能把用户的选中打掉
+                    _lstBle.Items.RemoveAt(idx);
+                    _lstBle.Items.Insert(idx, dev);
+                    _lstBle.SelectedIndex = sel;
+                }
+                LogLine("设备回连，GATT 读回鼠标固件版本：" + di.FwText
+                    + (dropped && !string.IsNullOrEmpty(old)
+                        ? (changed ? "（升级前 " + old + "）" : "（与升级前相同）")
+                        : ""),
+                    changed ? UiTheme.Success : UiTheme.TextSub);
+                UpdateBleConnUi(true);           // 状态栏连带刷新「固件 vX.Y」后缀
+            }
+            catch (Exception) { }
+            finally
+            {
+                _bleFwProbeBusy = 0;
             }
         }
 
@@ -1027,10 +1093,12 @@ namespace BibooUxTool
                 }
                 LogLine("已连上并发现特征；链路活性校验：" + (_ble.LastLivenessNote ?? "真实空口读取成功"),
                     UiTheme.Success);
-                LogLine(string.IsNullOrEmpty(dev.FwVersion)
-                        ? "设备固件版本：未知（连接后不再广播；断开关闭本页重进可读广播版本）"
-                        : "设备固件版本：" + dev.FwVersion,
-                    string.IsNullOrEmpty(dev.FwVersion) ? UiTheme.TextSub : UiTheme.Success);
+                if (string.IsNullOrEmpty(dev.FwVersion))
+                    LogLine("设备固件版本：未知（广播里没有：已连系统后不再广播；"
+                        + "GATT 里也没有：旧固件 OTA 服务下无 DevInf 特征 —— 升到带 DevInf 的固件后，"
+                        + "连接时会自动 GATT 读回版本）", UiTheme.TextSub);
+                else
+                    LogLine("设备固件版本：" + dev.FwVersion, UiTheme.Success);
                 if (!string.IsNullOrEmpty(_ble.LastSppCmdNote))
                     LogLine(_ble.LastSppCmdNote, UiTheme.TextSub);
                 if (_ble.HasOtaChar)
@@ -1234,7 +1302,7 @@ namespace BibooUxTool
         {
             try
             {
-                UiLog("Dongle 自身升级：镜像 " + _fw.Size + " 字节，CRC " + _fw.CrcHex +
+                UiLog("Dongle Self 升级：镜像 " + _fw.Size + " 字节，CRC " + _fw.CrcHex +
                       "（上传与校验阶段运行中的固件不会被修改）", 0);
 
                 int r = DongleSelfOta.Upload(_dongle, _fw.Raw, DongleSelfOta.DefaultPaceMs,

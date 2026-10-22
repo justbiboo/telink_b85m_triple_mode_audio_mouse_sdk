@@ -1063,10 +1063,21 @@ namespace BibooUxTool
                     chrRes.Characteristics == null || chrRes.Characteristics.Count == 0)
                 {
                     // 实测（8208 已配对路径）：链路刚连上、加密尚未就绪时读特征会
-                    // AccessDenied/Unreachable。退避 800ms 换 Uncached 重试一次再放弃该服务 ——
+                    // AccessDenied/Unreachable。退避换 Uncached 重试再放弃该服务 ——
                     // 不重试就会把「瞬态/缓存缺失」误判成「没有 SPP 特征」。
-                    await Task.Delay(800);
-                    chrRes = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
+                    // 断开→立即重连的窗口（supervision timeout 5s + 加密建立）实测
+                    // 一次 800ms 不够：自定义服务（SPP/OTA 特征所在）退避多试几轮再放弃。
+                    bool custom = !su.EndsWith("-0000-1000-8000-00805f9b34fb",
+                                               StringComparison.OrdinalIgnoreCase);
+                    int[] backoffs = custom ? new[] { 800, 1600, 2400 } : new[] { 800 };
+                    foreach (int delay in backoffs)
+                    {
+                        await Task.Delay(delay);
+                        chrRes = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
+                        if (chrRes != null && chrRes.Status == GattCommunicationStatus.Success &&
+                            chrRes.Characteristics != null && chrRes.Characteristics.Count > 0)
+                            break;
+                    }
                 }
                 if (chrRes == null || chrRes.Status != GattCommunicationStatus.Success)
                     continue;
@@ -1161,6 +1172,7 @@ namespace BibooUxTool
                             chrRes.Characteristics == null)
                             continue;
 
+                        bool foundOta = false;
                         foreach (var c in chrRes.Characteristics)
                         {
                             // 顺便补活性读探针：OTA 服务里有一个 READ 权限的设备信息特征
@@ -1182,8 +1194,12 @@ namespace BibooUxTool
                                 c.Uuid != BleUxProto.OtaWriteUuidRaw)
                                 continue;
                             lock (_sync) { _otaChar = c; _otaCharUuid = c.Uuid; }
-                            return true;
+                            /*不提前 return：DevInf 紧跟在 OTA 写特征之后，
+                             *扫完本列表才能把它一起搭上（否则回连补枚举永远拿不到版本）*/
+                            foundOta = true;
                         }
+                        if (foundOta)
+                            return true;
                     }
                 }
             }
@@ -1217,46 +1233,94 @@ namespace BibooUxTool
         {
             GattCharacteristic dev;
             lock (_sync) { dev = _devInfoChar; }
+
+            if (dev != null)
+            {
+                BleDevInf di = await ReadDevInfCharAsync(dev, timeoutMs);
+                if (di != null)
+                {
+                    LastDevInfoNote = null;
+                    return di;
+                }
+                /*掉线-回连后保留的特征对象可能绑定已失效的 service session：
+                 *Uncached 读恒 AccessDenied/Unreachable，活性探针（0x2A00 标准 GAP
+                 *特征）不受影响——必须重新枚举拿新特征对象，否则永远读不到*/
+            }
+
+            /*首次无特征，或读到但失败（疑似失效对象）→ 重枚举一次再读*/
+            await TryFindOtaCharAsync();
+            lock (_sync) { dev = _devInfoChar; }
             if (dev == null)
-                return null;
-
-            GattReadResult res;
-            try
             {
-                var cts = new CancellationTokenSource(timeoutMs);
-                Task<GattReadResult> t = dev.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(cts.Token);
-                Task done = await Task.WhenAny(t, Task.Delay(Timeout.Infinite, cts.Token));
-                if (done != t)
-                    return null;
-                res = await t;
-            }
-            catch (OperationCanceledException)
-            {
+                LastDevInfoNote = "未发现 DevInf 特征";
                 return null;
             }
-            catch (Exception)
+            BleDevInf di2 = await ReadDevInfCharAsync(dev, timeoutMs);
+            LastDevInfoNote = di2 == null ? "DevInf 读失败（" + _lastDevInfoRaw + "）" : null;
+            return di2;
+        }
+
+        /// <summary>最近一次 ReadDevInfoAsync 失败原因（诊断用）；成功后清空。</summary>
+        public string LastDevInfoNote { get; private set; }
+
+        /// <summary>最近一次 DevInf 特征读的原始结果（状态/字节数，诊断用）。</summary>
+        private string _lastDevInfoRaw;
+
+        /// <summary>读单个 DevInf 特征并解析；失败原因写 _lastDevInfoRaw。</summary>
+        private async Task<BleDevInf> ReadDevInfCharAsync(GattCharacteristic ch, int timeoutMs)
+        {
+            GattReadResult res = await ReadCharUncachedWithRetryAsync(ch, timeoutMs);
+            if (res == null || res.Status != GattCommunicationStatus.Success)
             {
+                _lastDevInfoRaw = res == null ? "超时/异常" : res.Status.ToString();
                 return null;
             }
-
-            if (res.Status != GattCommunicationStatus.Success)
-                return null;
-
-            byte[] buf;
             try
             {
                 var dr = DataReader.FromBuffer(res.Value);
                 int len = (int)dr.UnconsumedBufferLength;
-                buf = new byte[len];
+                byte[] buf = new byte[len];
                 if (len > 0)
                     dr.ReadBytes(buf);
+                BleDevInf di = BleDevInf.Parse(buf);
+                _lastDevInfoRaw = len + "B 解析" + (di == null ? "失败" : "成功");
+                return di;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                _lastDevInfoRaw = "缓冲异常：" + ex.Message;
                 return null;
             }
+        }
 
-            return BleDevInf.Parse(buf);
+        /// <summary>
+        /// Uncached 读一个特征，失败退避 800ms 再试一次。
+        /// 回连初期（链路恢复后 1-2s）读特征常见 AccessDenied/Unreachable ——
+        /// 与 DiscoverSppAsync 的特征枚举同款退避策略，没有它回连补读版本几乎必失败。
+        /// </summary>
+        private static async Task<GattReadResult> ReadCharUncachedWithRetryAsync(
+            GattCharacteristic ch, int timeoutMs)
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                try
+                {
+                    var cts = new CancellationTokenSource(timeoutMs);
+                    Task<GattReadResult> t = ch.ReadValueAsync(BluetoothCacheMode.Uncached).AsTask(cts.Token);
+                    Task done = await Task.WhenAny(t, Task.Delay(Timeout.Infinite, cts.Token));
+                    if (done == t)
+                    {
+                        GattReadResult res = await t;
+                        if (res != null && res.Status == GattCommunicationStatus.Success)
+                            return res;
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception) { }
+                if (i == 0)
+                    await Task.Delay(800);
+            }
+            return null;
         }
 
         /// <summary>
