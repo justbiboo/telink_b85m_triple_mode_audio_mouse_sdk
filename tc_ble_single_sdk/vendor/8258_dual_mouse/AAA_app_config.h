@@ -197,6 +197,27 @@ static inline void no_printf(const char *format, ...){    return;}
 #define BIBOO_UX_FT_DUT_MODEL	0x58
 #endif
 
+/* ================ BIBOO UX: bonded-channel ADV filter policy ================ */
+/* set_adv_type(): a bonded, non-pairing channel (mast_id) first advertises
+ * directed for 2s, then switches to undirected with
+ * ADV_FP_ALLOW_SCAN_WL_ALLOW_CONN_WL - i.e. only the peer address kept in the
+ * white list gets an LL-level ACK for its CONN_IND. Every other host is
+ * dropped inside the controller: on the master side this looks like
+ * "conn_success" immediately followed by reason 0x3E
+ * (HCI_ERR_CONN_FAILED_TO_ESTABLISH), retried forever (one attempt per
+ * ~6 connection events), with SDP/SMP never starting so the HID/SPP CCC
+ * handles stay 0. That is exactly what happens to a production dongle whose
+ * address was never bonded to this mouse.
+ *   1 : do not require the white list for the connection (ADV_FP_NONE); the 2s
+ *       directed window still gives the bonded host priority, afterwards any
+ *       host may connect - same behavior as the 8208 production mouse
+ *       (D21Pro_TX, where CUST_SAVE_MASTER_INFO_ENABLE_AAA=0 compiles the
+ *       whole white-list branch out and the ADV is always ADV_FP_NONE)
+ *   0 : original SDK behavior (white list only) */
+#ifndef BIBOO_UX_ADV_FP_OPEN
+#define BIBOO_UX_ADV_FP_OPEN	1
+#endif
+
 
 //--------------Debug gpio-------------------
 

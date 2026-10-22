@@ -488,7 +488,16 @@ void 	app_switch_to_indirect_adv(u8 e, u8 *p, int n)
                            ADV_TYPE_CONNECTABLE_UNDIRECTED, USER_OWN_ADDRESS_TYPE,
                            0,  NULL,
                            MY_APP_ADV_CHANNEL,
+#if (BIBOO_UX_ADV_FP_OPEN)
+                           /*BIBOO UX: this callback re-arms the ADV every time the
+                            *duration expires, so the filter policy has to follow
+                            *set_adv_type() as well - otherwise the white list comes
+                            *back after the first 2s and blocks every non-bonded host.
+                            *See AAA_app_config.h BIBOO_UX_ADV_FP_OPEN.*/
+                           ADV_FP_NONE);
+#else
                            ADV_FP_ALLOW_SCAN_WL_ALLOW_CONN_WL);
+#endif
 
 
     }
@@ -499,7 +508,12 @@ void 	app_switch_to_indirect_adv(u8 e, u8 *p, int n)
                            ADV_TYPE_CONNECTABLE_DIRECTED_LOW_DUTY, USER_OWN_ADDRESS_TYPE,
                            BLE_ADDR_PUBLIC, smp_param_inf[flash_dev_info.mast_id].peer_addr,
                            BLT_ENABLE_ADV_ALL,
+#if (BIBOO_UX_ADV_FP_OPEN)
+                           /*BIBOO UX: any host may connect, see BIBOO_UX_ADV_FP_OPEN*/
+                           ADV_FP_NONE);
+#else
                            ADV_FP_ALLOW_SCAN_WL_ALLOW_CONN_WL);
+#endif
     }
 
     bls_ll_setAdvDuration(1000000, 1);
@@ -1273,7 +1287,17 @@ void set_adv_type()
                                ADV_TYPE_CONNECTABLE_DIRECTED_HIGH_DUTY, USER_OWN_ADDRESS_TYPE,
                                BLE_ADDR_PUBLIC, smp_param_inf[flash_dev_info.mast_id].peer_addr,
                                BLT_ENABLE_ADV_ALL,
+#if (BIBOO_UX_ADV_FP_OPEN)
+                               /*BIBOO UX: the white list is kept only for address resolution; the
+                                *connection itself must not depend on it. With the SDK default
+                                *(ADV_FP_ALLOW_SCAN_WL_ALLOW_CONN_WL) the undirected phase after the
+                                *2s directed window answers only the bonded host at the LL layer, so
+                                *any other dongle gets conn_success then 0x3E forever. See
+                                *AAA_app_config.h BIBOO_UX_ADV_FP_OPEN.*/
+                               ADV_FP_NONE);
+#else
                                ADV_FP_ALLOW_SCAN_WL_ALLOW_CONN_WL);
+#endif
             bls_ll_setAdvDuration(2000000, DIRECT_ADV_TO_UNDIRECT_ENABLE);
 
 		} 
@@ -1316,7 +1340,13 @@ void set_adv_type()
             bls_ll_setAdvDuration(0, 0);
 			bls_ll_setAdvParam(MY_ADV_INTERVAL_MIN, MY_ADV_INTERVAL_MAX, \
 							ADV_TYPE_CONNECTABLE_UNDIRECTED, USER_OWN_ADDRESS_TYPE, \
-							0,  NULL, MY_APP_ADV_CHANNEL, ADV_FP_ALLOW_SCAN_WL_ALLOW_CONN_WL);
+							0,  NULL, MY_APP_ADV_CHANNEL,
+#if (BIBOO_UX_ADV_FP_OPEN)
+							/*BIBOO UX: any host may connect, see BIBOO_UX_ADV_FP_OPEN*/
+							ADV_FP_NONE);
+#else
+							ADV_FP_ALLOW_SCAN_WL_ALLOW_CONN_WL);
+#endif
 
         }
 
