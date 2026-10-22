@@ -205,7 +205,6 @@ void ux_user_data_set_authorization(void)
 /* ================ module entry ================ */
 
 static u32 ux_user_data_tick_1 = 0;		/*1s: tick LED + blue blink*/
-static u32 ux_user_data_tick_2 = 0;		/*1s: DUT auth state polling (0x78)*/
 
 void ux_user_data_proc(void)
 {
@@ -237,15 +236,14 @@ void ux_user_data_proc(void)
 #endif
 	}
 
-	/*factory userDataFunMainLoop timer 2*/
-	if (clock_time_exceed(ux_user_data_tick_2, 1000000))
-	{
-		ux_user_data_tick_2 = clock_time();
-
-#if (BIBOO_UX_SPP)
-		ux_spp_get_auth_state_cmd();	/*1s inquiry of the DUT auth state (0x78)*/
-#endif
-	}
+	/*2026-10-20: timer 2 (1s DUT auth-state query, 0x78) removed - useless
+	 *with the current mouse firmware. The query always answers AUTH_INVALID,
+	 *so the dongle re-challenged with 0x77 every single second: two 20B
+	 *frames/s of pure noise on the DUT UART log for a handshake that never
+	 *completes. The rx path stays intact (ux_spp.c ux_spp_auth_rx_handle):
+	 *should anything ever send 0x77/0x78 again, replies are still consumed,
+	 *the tick is still spent on success and the white-LED indication still
+	 *works. The factory-test STATUS tick report is unaffected.*/
 }
 
 void ux_user_data_init(void)

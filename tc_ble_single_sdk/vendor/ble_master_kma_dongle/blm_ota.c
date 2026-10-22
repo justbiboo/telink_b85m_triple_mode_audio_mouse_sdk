@@ -24,6 +24,7 @@
 #include "tl_common.h"
 #include "drivers.h"
 #include "stack/ble/ble.h"
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: defines the BIBOO_UX_USER_MODULE master switch (vendor/user/user_module_manage.h). MUST stay before the first BIBOO_UX_* gate below - every BIBOO block in this file silently collapses to the stock-SDK path (e.g. master_ota_result missing at link time) when this header has not been seen yet.*/
 #include "app.h"
 #include "blm_host.h"
 
@@ -34,6 +35,39 @@ extern void host_att_set_current_readByTypeReq_uuid(u8 *uuid, u8 uuid_len);
 
 extern const u8 my_OtaUUID[16];
 
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+/*BIBOO UX 2026-10-20: PC-fed stream source (ux_ota_slot.c). When
+ *ota_stream_total != 0 the image arrives over the USB host link instead
+ *of dongle flash: proc_ota pulls 16B blocks from the stream fifo in step
+ *6 and the image never touches flash. See ux_ota_slot.h. */
+extern u32 ota_stream_total;
+/*BIBOO UX 2026-10-21: get16 stages a block but does not consume it - the
+ *caller commits only once the push was accepted (see the .c). That is what
+ *makes a rejected blc_gatt_pushWriteCommand retryable instead of silently
+ *dropping 16 bytes and shifting the whole image by one slot.*/
+extern int ux_ota_stream_get16(u8 *dst);	/*1 = dst filled with a full 16B block*/
+extern void ux_ota_stream_commit(void);		/*after BLE_SUCCESS: consume it*/
+extern u8 ux_ota_stream_eof(void);		/*1 = PC sent SLOT_END + everything pushed*/
+extern u8 ux_ota_stream_ready(void);		/*1 = a full block can be built now*/
+extern u32 ux_ota_stream_pending(void);	/*queued+staged bytes (stall diag)*/
+
+/*BIBOO UX 2026-10-20: OTA characteristic handle already resolved by the
+ *connect-time service discovery (simple_sdp.c app_service_discovery ->
+ *conn_char_handler[2], matched on the same 128-bit UUID TELINK_SPP_DATA_OTA
+ *the read-by-type request in proc_ota step 2 looks for). Reusing it skips
+ *an ATT round trip the 8208 mouse did not answer (field log 20:51: the
+ *session sat at discovery step 3 for 10s until the rx watchdog aborted).
+ *[2] holds the characteristic VALUE handle - exactly the attribute the
+ *write commands below must target (field log 21:17: the shipping
+ *Biboo_8208_Dual_Mode_Origin mouse resolves it to 0x000E - that project
+ *puts the OTA service BEFORE the battery service, unlike the
+ *tc_ble_single_sdk reference table where it sits at 0x12).
+ *NOTE: simple_sdp.c stores handles in a u8 array - fine for the current
+ *mouse tables (both < 255); a future table past handle 255 would need
+ *that array widened. */
+extern u8 conn_char_handler[];
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+
 
 int master_ota_test_mode = 0;
 
@@ -42,7 +76,15 @@ int master_ota_test_mode = 0;
 
 
 #define FW_SIZE_MAX			128  //128K
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+/*BIBOO UX: was 20s. The dongle pushes as fast as the link allows (TX FIFO
+ *paced, no artificial throttle) - a 128K image needs ~5000+ packets and can
+ *approach 20s on a busy 2.4G band. The slave budget is 60s
+ *(blc_ota_setOtaProcessTimeout(60)), so match it here. */
+#define OTA_TIMEOUT_S		60
+#else
 #define OTA_TIMEOUT_S		20
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 
 #define LED_INTERVAL_US  	400000
 #define OTA_INTERVAL_US  	500000
@@ -76,8 +118,27 @@ u32 led_indicate_begin_tick;
 u32 led_indicate_gpio;
 u32 ota_result_tick;
 
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+/*BIBOO UX: master OTA result for the PC tool (polled via the ota_slot
+ *status command): 0 = none/running, 1 = success, 2 = fail. Reset by the
+ *trigger, latched in ota_set_result() below. */
+int master_ota_result = 0;
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+
 int host_ota_start = 0;
 int host_ota_update_pending;
+
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+/*BIBOO UX 2026-10-20: bounded ATT discovery for the OTA characteristic
+ *(proc_ota step 3). The slave can answer a read-by-type request with an
+ *ATT_ERROR_RSP, or with nothing at all - blm_host.c had no handler for
+ *either, so the original code sat at step 3 forever (field log 20:51:
+ *10s of "ota step 3" until the rx watchdog aborted the session). Retry
+ *the request twice (2s apart), then fail the session so the PC gets a
+ *latched result instead of a silent hang. */
+static u32 ota_disc_tick;
+static u8  ota_disc_tries;
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 
 /**
  * @brief		this function serves to use led status to show the ota result
@@ -110,6 +171,9 @@ void ota_set_result(int success)
 
 	host_ota_start = 0;
 	master_ota_cmd = 0;
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+	master_ota_result = success ? 1 : 2;	/*BIBOO UX: latch for the PC tool*/
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 	ota_result_tick = clock_time() | 1;
 
 	//write_reg8(reg_cmd_result,status);  //1 OK  0 fail
@@ -150,13 +214,37 @@ void host_button_trigger_ota_start(int button0_press_flag, int button1_press_fla
  */
 void host_ota_update_conn_complete( u16 interval, u16 latency, u16 timeout )
 {
-	if(host_ota_update_pending == 2 && interval == 8 && latency == 0 && timeout == 200){
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+	/*BIBOO UX 2026-10-20: the original code advanced only on an exact
+	 * (interval 8, latency 0, timeout 200) match. The requested update is
+	 * a pure optimization - the dongle-mouse link already runs at interval
+	 * 8 / latency 0 - but if the slave rejects the update, or the complete
+	 * event carries different params, host_ota_start stayed at 1 forever
+	 * and the master OTA could never start (field log 2026-10-20 20:32:
+	 * 10s at step 1 until the rx watchdog aborted the session). Any
+	 * completed update while the OTA one is pending is good enough to
+	 * move on to the ATT discovery. */
+	if(host_ota_update_pending == 2){
 		host_ota_update_pending = 0;
 
 		if(host_ota_start == 1){
 			host_ota_start = 2;
+			ota_disc_tries = 0;	/*fresh discovery window, see step 3*/
+			printf("[blm_ota] conn update done (int %d lat %d to %d), start discovery\r\n",
+				   interval, latency, timeout);
 		}
 	}
+#else
+	if(host_ota_update_pending == 2){
+		host_ota_update_pending = 0;
+
+		if(interval==8 && latency==0 && timeout==200){
+			if(host_ota_start == 1){
+				host_ota_start = 2;
+			}
+		}
+	}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 }
 
 
@@ -175,6 +263,7 @@ void host_find_slave_ota_attHandle(u8 *p)
 		slave_ota_handle = ptr->data[0] | ptr->data[1]<<8;
 
 		host_ota_start = 4;
+		printf("[blm_ota] slave OTA write handle 0x%04X\r\n", slave_ota_handle);
 	}
 }
 
@@ -196,10 +285,28 @@ void proc_ota (void)
 	{
 
 		if(blc_ll_getCurrentState() == BLS_LINK_STATE_CONN){  //still in connection state
-			//10ms interval,  latency = 0   timeout = 2S
+			//10ms interval,  latency = 0   timeout = 6S
+			/*BIBOO UX 2026-10-20 (field log 21:17): was timeout=200 (2S).
+			 *The dongle-mouse link ALREADY runs at interval 8 (10ms), so
+			 *this update gains nothing on speed - it only used to HALVE the
+			 *supervision timeout (4S -> 2S). The 8208 mouse does flash work
+			 *when the OTA starts (area erase / first page write), its BLE
+			 *stack stalls for a moment, the push engine gates on the TX
+			 *fifo, and with only 2S of supervision the link died ~2s into
+			 *the very first push (attempt 1: 8 PDUs, then terminate). The
+			 *mouse's own preferred supervision timeout is 6S (its GAP conn
+			 *params) and the PC-direct OTA channel runs at that value with
+			 *no drops - match it here. If the mouse rejects the update the
+			 *step-1 1.5s fallback advances anyway. */
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
 			blm_ll_updateConnection (cur_conn_device.conn_handle,
-										8, 8, 0,  200,
+										8, 8, 0,  600,
 											  0, 0 );
+#else
+			blm_ll_updateConnection (cur_conn_device.conn_handle,
+								8, 8, 0,  200,
+									  0, 0 );
+			#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 
 			host_ota_update_pending = 2;
 
@@ -296,6 +403,19 @@ void proc_ota (void)
     if(host_ota_start){
     	//ota timeout or disconnect. ota fail
     	if( clock_time_exceed(ota_begin_tick, OTA_TIMEOUT_S * 1000000) || blc_ll_getCurrentState() != BLS_LINK_STATE_CONN){
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+        	/*BIBOO UX 2026-10-20 (field log 21:17 attempt 2): the link died
+        	 *within ~1s of CMD_OTA_START with 0 bytes pushed. That is the
+        	 *signature of the mouse REJECTING the START - it was still in
+        	 *OTA mode from a previous session that ended in a link drop
+        	 *(OTA_FLOW_ERR=6, and its result callback unconditionally sets
+        	 *the shutdown flag -> reboot + auto power-off). The fix is on
+        	 *the mouse side: power-cycle it (or wait ~60s for its OTA
+        	 *process timeout) before retrying. */
+    		if(host_ota_start >= 4 && ota_adr == 0){
+    			printf("[blm_ota] link lost before first push (step %d): mouse likely rejected START (stale OTA session?) - power-cycle the mouse\r\n", host_ota_start);
+    		}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
         	ota_set_result(0);
     		return;
     	}
@@ -320,10 +440,22 @@ void proc_ota (void)
 			}
 
 
-			n_firmware = *(u32 *)(flash_adr_ota_master + 0x18);
-			if(n_firmware > (FW_SIZE_MAX<<10)){  //bigger then 128K
-				ota_set_result(0);
-				return;
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+			/*BIBOO UX: stream mode - the PC fed the image over the host
+			 *link, so the size comes from SLOT_BEGIN (validated there)
+			 *and no flash read is needed. Otherwise (button-triggered
+			 *legacy path) read the size word from the slot header. */
+			if(ota_stream_total){
+				n_firmware = ota_stream_total;
+			}
+			else
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+			{
+				n_firmware = *(u32 *)(flash_adr_ota_master + 0x18);
+				if(n_firmware > (FW_SIZE_MAX<<10)){  //bigger then 128K
+					ota_set_result(0);
+					return;
+				}
 			}
 
 
@@ -333,22 +465,93 @@ void proc_ota (void)
 		    host_ota_update_pending = 1;
 		}
 	}
+	else if(host_ota_start == 1)
+	{
+		/*BIBOO UX 2026-10-20: bounded wait for the connection parameter
+		 *update requested at step 0 (see host_ota_update_conn_complete).
+		 *The update is a pure optimization - the dongle-mouse link already
+		 *runs at interval 8 / latency 0 - but if the slave rejects it, the
+		 *complete event never arrives, or it carries different params, the
+		 *original code waited here forever (field log 2026-10-20 20:32:
+		 *10s at step 1, rx watchdog abort). Advance to the discovery step
+		 *anyway after 1.5s: a 10ms link pushes at full speed without the
+		 *update. A normal update completes within ~100ms, so this never
+		 *delays the happy path. */
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+		if(clock_time_exceed(ota_begin_tick, 1500000))
+		{
+			host_ota_update_pending = 0;
+			host_ota_start = 2;
+			ota_disc_tries = 0;	/*fresh discovery window, see step 3*/
+			printf("[blm_ota] conn update wait timeout, start discovery anyway\r\n");
+		}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+	}
 	else if(host_ota_start == 2)
 	{
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+		/*BIBOO UX 2026-10-20: prefer the handle the connect-time service
+		 *discovery already resolved. The mouse OTA characteristic sits in
+		 *its ATT table from boot, so there is nothing to discover - and
+		 *the 8208 mouse did not answer the 128-bit read-by-type request
+		 *below over the air (field log 20:51: stuck at step 3 until the
+		 *session watchdog aborted). The SDP result is the very attribute
+		 *that request would have returned, with zero ATT round trips. */
+		if(conn_char_handler[2]){
+			slave_ota_handle = conn_char_handler[2];
+			host_ota_start = 4;
+			printf("[blm_ota] OTA write handle 0x%04X (connect-time SDP)\r\n",
+				   slave_ota_handle);
+		}
+		else
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+		{
+			/*Send read_by_type_req to get remote's OTA handle
+			 * once receive remote's response, call back function att_read_by_type_rsp_handler
+			 * will be called to get the handle and set host_ota_start to 2*/
+			host_att_set_current_readByTypeReq_uuid((u8 *)my_OtaUUID, 16);
 
-	    /*Send read_by_type_req to get remote's OTA handle
-	     * once receive remote's response, call back function att_read_by_type_rsp_handler
-	     * will be called to get the handle and set host_ota_start to 2*/
-		host_att_set_current_readByTypeReq_uuid((u8 *)my_OtaUUID, 16);
+			if(BLE_SUCCESS==blc_gatt_pushReadByTypeRequest (BLM_CONN_HANDLE, 1, 0xffff, read_by_type_req_uuid, 16)){
+				host_ota_start = 3;
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+				ota_disc_tick = clock_time();
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+			}
+		}
 
-	    if(BLE_SUCCESS==blc_gatt_pushReadByTypeRequest (BLM_CONN_HANDLE, 1, 0xffff, read_by_type_req_uuid, 16)){
-	    	host_ota_start = 3;
-	    }
-
+	}
+	else if(host_ota_start == 3)
+	{
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+		/*BIBOO UX 2026-10-20: bounded discovery wait - see the
+		 *ota_disc_tries declaration. No response within 2s: resend the
+		 *request (the first push may have been dropped on a congested
+		 *link). Still nothing after 3 tries: fail the session cleanly
+		 *(ota_set_result latches result=2 for the PC and releases the
+		 *deferred SLOT_BEGIN response with an error). */
+		if(clock_time_exceed(ota_disc_tick, 2000000)){
+			if(ota_disc_tries < 3){
+				ota_disc_tries++;
+				printf("[blm_ota] OTA discovery timeout, resend (%d)\r\n", ota_disc_tries);
+				host_ota_start = 2;	/*step 2 re-sends the request*/
+			}
+			else{
+				printf("[blm_ota] OTA discovery failed (no att rsp), abort\r\n");
+				ota_set_result(0);
+			}
+		}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 	}
 	else if (host_ota_start == 4)
 	{
-		p_firmware = (u8 *)flash_adr_ota_master;
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+		/*BIBOO UX: stream mode consumes the PC-fed fifo in step 6; the
+		 *flash pointer is only needed for the legacy/button path. */
+		if(!ota_stream_total)
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+		{
+			p_firmware = (u8 *)flash_adr_ota_master;
+		}
 		ota_adr = 0;
 
 
@@ -367,7 +570,72 @@ void proc_ota (void)
 	}
 	else if (host_ota_start == 6)  //send ota data form addr 0 ~ n_firmware
 	{
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+		/*BIBOO UX 2026-10-20 (field log 21:17 attempt 1): the push engine
+		 *gated on !isRfStateMachineBusy() && getTxFifoNumber() < 5 for the
+		 *rest of the session after 8 PDUs - the mouse was doing its
+		 *OTA-start flash work / its RX was congested, so the TX fifo never
+		 *drained and the dongle went silent on a link whose supervision
+		 *timeout had been shortened to 2S (see step 0). Result: link
+		 *terminate, mouse left stuck in OTA mode, next START rejected with
+		 *OTA_FLOW_ERR(6). Track the stall, print the gate state so the
+		 *field log shows WHY, and after 3s push anyway - queuing one more
+		 *PDU is safe even mid connection event (the push API itself fails
+		 *gracefully when the fifo is truly full). */
+		static u32 ota_push_idle_tick = 0;	/*last push, or last dry-fifo tick*/
+		static u8  ota_push_stall_logged = 0;
+		/*BIBOO UX 2026-10-21: pace the push exactly like the BLE-direct
+		 *channel does (OtaForm uses 4ms/PDU there, and that is the channel
+		 *that passes). Without it the dongle packs several PDUs into one
+		 *connection event; the mouse writes each OTA PDU to flash and has a
+		 *tiny ATT RX queue, so the extras are dropped silently - no error
+		 *anywhere, just a hole in adr_index -> OTA_PACKET_LOSS(1). 4ms puts
+		 *the 4981-PDU image at ~20s, well inside the 60s process timeout.
+		 *Note this is NOT part of `allow` on purpose: pacing must not look
+		 *like a gate stall to the watchdog below.*/
+		static u32 ota_pace_tick = 0;
+		#define OTA_PUSH_MIN_GAP_US		4000
+
+		/*"ready" (not "pending >= 16"): the short tail block needs only the
+		 *last 4 bytes and no further PC frame will arrive, so the old gate
+		 *could never release it - the push engine sat there until the rx
+		 *watchdog killed the session.*/
+		u8 pending = ota_stream_total && ux_ota_stream_ready();
+		u8 allow   = !blm_ll_isRfStateMachineBusy() && blc_ll_getTxFifoNumber() < 5;
+		/*stream mode only: the legacy flash-slot path never arms ota_pace_tick
+		 *and must not be throttled by a stale value from a previous session*/
+		u8 paced   = (ota_stream_total &&
+					  !clock_time_exceed(ota_pace_tick, OTA_PUSH_MIN_GAP_US)) ? 1 : 0;
+
+		if (pending && !allow)
+		{
+			if (clock_time_exceed(ota_push_idle_tick, 1000000) && !ota_push_stall_logged)
+			{
+				ota_push_stall_logged = 1;
+				printf("[blm_ota] push stall: txFifo %d, rfBusy %d, streamFifo %d, pushed %d\r\n",
+					   blc_ll_getTxFifoNumber(), blm_ll_isRfStateMachineBusy(),
+					   (int)ux_ota_stream_pending(), (int)ota_adr);
+			}
+			if (clock_time_exceed(ota_push_idle_tick, 3000000))
+			{
+				/*3s gated with data waiting: force one push per 3s window*/
+				allow = 1;
+				ota_push_idle_tick = clock_time();
+				ota_push_stall_logged = 0;
+			}
+		}
+		else
+		{
+			/*pushing, or fifo dry (waiting for the next PC frame) - either
+			 *way the engine is alive, re-arm the stall timer*/
+			ota_push_idle_tick = clock_time();
+			ota_push_stall_logged = 0;
+		}
+
+		if( allow && !paced )
+#else
 		if( !blm_ll_isRfStateMachineBusy() && blc_ll_getTxFifoNumber() < 5 )
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 		{
 				u8 ota_buffer[20];
 				rf_packet_att_ota_data_t *p = (rf_packet_att_ota_data_t *)ota_buffer;
@@ -376,16 +644,50 @@ void proc_ota (void)
 
 				p->adr_index = ota_adr>>4;
 
-				if(nlen == 16){
+			if(nlen == 16){
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+				/*BIBOO UX: PC-fed stream mode - build the block from the
+				 *host-link fifo instead of flash. get16 hands out only a
+				 *FULL block (tail block 0xFF-padded, byte-identical to the
+				 *BLE-direct channel) and does not consume it; commit below
+				 *so a rejected push keeps the bytes for the retry. */
+				if(ota_stream_total){
+					if(ux_ota_stream_get16(p->data)){
+						p->crc_16 = crc16((u8 *)&(p->adr_index), 18);
+
+						if(BLE_SUCCESS == blc_gatt_pushWriteCommand(BLM_CONN_HANDLE,slave_ota_handle,(u8 *)p, 20)){ // send write command OK
+							ux_ota_stream_commit();	//consume the staged block
+							ota_adr += 16;  //next data index
+							ota_lastData_tick = clock_time();
+							ota_pace_tick = clock_time();	//4ms inter-PDU budget
+						}
+						/*else: link congested. Do NOT commit - the next
+						 *iteration re-pushes these exact bytes with the same
+						 *adr_index. Dropping them here shifted every later
+						 *block one slot and made the mouse answer
+						 *OTA_FW_CHECK_ERR(6). */
+					}
+					/*else: fifo dry. Only finish when the PC closed the
+					 *stream (SLOT_END + everything pushed) - a dry fifo
+					 *mid-transfer just means "wait for the next frame". */
+					else if(ux_ota_stream_eof()){
+						host_ota_start = 7;  //all stream data OK, to next step
+					}
+				}
+				else
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+				{
 					memcpy(p->data, p_firmware + ota_adr, 16);
 
 					p->crc_16 = crc16((u8 *)&(p->adr_index), 18);
 
 					if(BLE_SUCCESS == blc_gatt_pushWriteCommand(BLM_CONN_HANDLE,slave_ota_handle,(u8 *)p, 20)){ // send write command OK
 						ota_adr += 16;  //next data index
+						ota_lastData_tick = clock_time();
 					}
-
 				}
+
+			}
 				else{
 					host_ota_start = 7;  //all ota data OK, to next step
 				}
@@ -394,7 +696,7 @@ void proc_ota (void)
 	}
 	else if(host_ota_start == 7)
 	{
-		if( clock_time_exceed(ota_lastData_tick, 1) ){  //50ms after last valid data, master send OTA_end cmd
+		if( clock_time_exceed(ota_lastData_tick, 50000) ){  //50ms after last valid data, master send OTA_end cmd
 			host_ota_start = 8;
 		}
 	}

@@ -56,6 +56,17 @@ int 	app_host_smp_finish (void);
  */
 void 	host_update_conn_proc(void);
 
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+/*BIBOO UX 2026-10-21: one-shot mouse DevInf_aaa read after connect + SDP.
+ *Called from main_idle_loop() every iteration (NOT from
+ *host_update_conn_proc() - that one only runs while a connection-parameter
+ *update is pending, so hooking it there never fires).*/
+void 	ux_devinf_proc(void);
+u8   *ux_devinf_get(void);
+u8    ux_devinf_ready(void);
+void   ux_devinf_reset(void);
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+
 extern u32 host_update_conn_param_req;
 extern int central_smp_pending;
 

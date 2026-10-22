@@ -24,7 +24,7 @@
 #include "tl_common.h"
 #include "drivers.h"
 #include "stack/ble/ble.h"
-
+#include "vendor/user/user_module_manage.h"	/*BIBOO UX: defines the BIBOO_UX_USER_MODULE master switch (vendor/user/user_module_manage.h). Kept BEFORE blm_host.h so the BIBOO_UX_*-gated prototypes (ux_devinf_*) inside blm_host.h are visible here.*/
 #include "app.h"
 #include "blm_att.h"
 #include "blm_host.h"
@@ -33,7 +33,6 @@
 #include "application/audio/audio_config.h"
 #include "application/usbstd/usb.h"
 #include "app_audio.h"
-#include "vendor/user/user_module_manage.h"	/*BIBOO UX: vendor/user module entry (see vendor/user/user_module_manage.c)*/
 
 
 #if (TL_AUDIO_MODE == TL_AUDIO_DONGLE_ADPCM_GATT_GOOGLE) && (GOOGLE_VOICE_OVER_BLE_SPCE_VERSION == GOOGLE_VERSION_1_0)
@@ -383,6 +382,15 @@ int main_idle_loop (void)
 	 *vendor/user/user_module_manage.c*/
 	user_module_proc();
 	#endif
+
+	/*BIBOO UX 2026-10-21: one-shot mouse DevInf_aaa read (version relay to the
+	 *PC via host-link cmd 0x55). Must run here, unconditionally - it cannot
+	 *live in host_update_conn_proc(), which main_idle_loop() only calls while
+	 *host_update_conn_param_req is set (i.e. only in the brief
+	 *connection-parameter-update window).*/
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+	ux_devinf_proc();
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 
 
 #if(BLE_MASTER_OTA_ENABLE)

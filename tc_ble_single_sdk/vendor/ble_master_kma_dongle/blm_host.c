@@ -409,6 +409,15 @@ int blm_le_connection_establish_event_handle(u8 *p)
 
 
 
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+/*BIBOO UX 2026-10-21: mouse device-info (DevInf_aaa) cache - forward decls.*/
+void ux_devinf_reset(void);
+void ux_devinf_proc(void);
+void ux_devinf_on_read_rsp(u8 *p);
+u8  *ux_devinf_get(void);
+u8   ux_devinf_ready(void);
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+
 /**
  * @brief		this function serves to connect terminate
  * @param[in]	p - data pointer of event
@@ -480,6 +489,10 @@ int 	blm_disconnect_event_handle(u8 *p)
 
 
 	host_update_conn_param_req = 0; //when disconnect, clear update conn flag
+
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+	ux_devinf_reset();	/*BIBOO UX: mouse gone -> drop cached DevInf (re-read on reconnect, e.g. after OTA)*/
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
 
 	host_att_data_clear();
 
@@ -637,6 +650,113 @@ int controller_event_callback (u32 h, u8 *p, int n)
 
 
 
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+/*---------------------------------------------------------------------------
+ * BIBOO UX 2026-10-21: mouse device-info (DevInf_aaa) cache.
+ *
+ * The dongle is the BLE master for the mouse, so it can read the very same
+ * read-only GATT characteristic the PC reads on the BLE-direct path: the
+ * DevInf_aaa characteristic under the OTA service (value handle 0x0010,
+ * ATT_PERMISSIONS_READ - no pairing / encryption / advertising needed).
+ *
+ * The 15-byte value is cached here and relayed to the PC over the USB host
+ * link (cmd 0x55 GET_DEV_INFO, see vendor/user/host_link/ux_host_link.c), so
+ * the OTA page can show the mouse firmware version on the USB-dongle channel
+ * too (the dongle owns the single BLE link, so the PC cannot read it itself).
+ *
+ * The DevInf value handle sits directly after the OTA write value handle:
+ *   OTA write  decl 0x000D -> value 0x000E
+ *   DevInf     decl 0x000F -> value 0x0010
+ * so it is derived from conn_char_handler[2] (the connect-time SDP result,
+ * 0x000E on Biboo_8208_Dual_Mode_Origin) with +2, no extra discovery pass.
+ *-------------------------------------------------------------------------*/
+#define UX_DEVINF_LEN		15	/*DevInf_aaa size*/
+#define UX_DEVINF_OFF_FW	12	/*user firmware version: bytes 12..14*/
+#define UX_DEVINF_OFF_MOUSE	9	/*mouse SDK version: bytes 9..11*/
+#define UX_DEVINF_OFF_IC	6	/*IC SDK version: bytes 6..8*/
+
+static u8  ux_devinf_val[UX_DEVINF_LEN];
+static u8  ux_devinf_got = 0;		/*1 = cache valid*/
+static u8  ux_devinf_pending = 0;	/*read request in flight*/
+static u8  ux_devinf_tries = 0;
+static u32 ux_devinf_tick = 0;
+
+u8 *ux_devinf_get(void)   { return ux_devinf_val; }
+u8  ux_devinf_ready(void) { return ux_devinf_got; }
+
+void ux_devinf_reset(void)
+{
+	ux_devinf_got = 0;
+	ux_devinf_pending = 0;
+	ux_devinf_tries = 0;
+	memset(ux_devinf_val, 0, sizeof(ux_devinf_val));
+}
+
+/*one-shot read after connect + SDP; one retry per second, at most 5 tries
+ *(a device without DevInf must not be polled forever). Called from
+ *host_update_conn_proc() every main loop once SMP/SDP are done.*/
+void ux_devinf_proc(void)
+{
+	u16 h;
+	if (ux_devinf_got)
+		return;
+	if (blc_ll_getCurrentState() != BLS_LINK_STATE_CONN)
+		return;
+	if (!conn_char_handler[2])
+		return;		/*OTA write handle unknown yet (SDP still running)*/
+	if (ux_devinf_pending)
+	{
+		if (!clock_time_exceed(ux_devinf_tick, 1000000))	/*1s*/
+			return;
+		ux_devinf_pending = 0;	/*slave never answered: retry*/
+	}
+	if (ux_devinf_tries >= 5)
+		return;
+
+	h = (u16)(conn_char_handler[2] + 2);	/*0x000E -> 0x0010*/
+	if (BLE_SUCCESS == blc_gatt_pushReadRequest(BLM_CONN_HANDLE, h))
+	{
+		ux_devinf_pending = 1;
+		ux_devinf_tick = clock_time();
+		ux_devinf_tries++;
+		printf("[devinf] read DevInf handle 0x%04X (try %d)\r\n", h, ux_devinf_tries);
+	}
+}
+
+/*called from app_l2cap_handler() on ATT_OP_READ_RSP*/
+void ux_devinf_on_read_rsp(u8 *p)
+{
+	rf_packet_l2cap_t *l2 = (rf_packet_l2cap_t *)p;
+	rf_packet_att_t   *a  = (rf_packet_att_t *)p;
+	u8 vlen;
+	u8 *val;
+
+	if (!ux_devinf_pending)
+		return;
+	ux_devinf_pending = 0;
+
+	vlen = (u8)(l2->l2capLen - 1);	/*minus the ATT opcode*/
+	val  = &a->handle0;			/*READ_RSP: value starts right after the opcode*/
+	if (vlen > UX_DEVINF_LEN)
+		vlen = UX_DEVINF_LEN;
+	if (vlen)
+		memcpy(ux_devinf_val, val, vlen);
+
+	if (vlen >= UX_DEVINF_LEN)
+	{
+		ux_devinf_got = 1;
+		printf("[devinf] mouse fw %d.%d.%d / mouse SDK %d.%d.%d / IC SDK %d.%d.%d\r\n",
+			   ux_devinf_val[UX_DEVINF_OFF_FW + 0], ux_devinf_val[UX_DEVINF_OFF_FW + 1], ux_devinf_val[UX_DEVINF_OFF_FW + 2],
+			   ux_devinf_val[UX_DEVINF_OFF_MOUSE + 0], ux_devinf_val[UX_DEVINF_OFF_MOUSE + 1], ux_devinf_val[UX_DEVINF_OFF_MOUSE + 2],
+			   ux_devinf_val[UX_DEVINF_OFF_IC + 0], ux_devinf_val[UX_DEVINF_OFF_IC + 1], ux_devinf_val[UX_DEVINF_OFF_IC + 2]);
+	}
+	else
+	{
+		printf("[devinf] short read (%d bytes), will retry\r\n", vlen);
+	}
+}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+
 /**
  * @brief      update connection parameter in mainloop
  * @param[in]  none
@@ -776,6 +896,28 @@ int app_l2cap_handler (u16 conn_handle, u8 *raw_pkt)
 				host_find_slave_ota_attHandle( (u8 *)pAtt );
 			#endif
 			//u16 slave_ota_handle;
+		}
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+		else if(pAtt->opcode == ATT_OP_READ_RSP)  //slave ack our DevInf GATT read (cmd 0x55 relay)
+		{
+			ux_devinf_on_read_rsp((u8 *)pAtt);	/*BIBOO UX: cache DevInf_aaa for the host link*/
+		}
+#endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT */
+		else if(pAtt->opcode == ATT_OP_ERROR_RSP)  //slave rejected one of our ATT requests
+		{
+			#if (BLE_MASTER_OTA_ENABLE)
+			/*BIBOO UX 2026-10-20: there was NO handler for error responses,
+			 *so a rejected discovery looked exactly like "no answer" and
+			 *proc_ota waited at the discovery step forever (field log
+			 *20:51). Print it while the master OTA is the one waiting.
+			 *PDU bytes: [opcode][reqOpcode][attrHandle lo][attrHandle hi]
+			 *[errorCode] - error 0x0A = attribute not found. */
+			extern int host_ota_start;
+			if(host_ota_start == 3){
+				printf("[blm_ota] att err rsp: %02X %02X %02X %02X %02X\r\n",
+					   pAtt->opcode, pAtt->handle0, pAtt->handle1, pAtt->dat[0], pAtt->dat[1]);
+			}
+			#endif
 		}
 		else if(pAtt->opcode == ATT_OP_HANDLE_VALUE_NOTI)  //slave handle notify
 		{

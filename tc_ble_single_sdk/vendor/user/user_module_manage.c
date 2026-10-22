@@ -26,6 +26,8 @@
 #include "factory_test/ux_factory_test.h"
 #include "factory_test/ux_ft_dut.h"	/*BIBOO UX: DUT-side factory test (mouse builds only, see switch BIBOO_UX_FACTORY_TEST_DUT)*/
 #include "factory_test/ux_ft_touch.h"	/*BIBOO UX: DUT-side touch sample source (0x22 events, weak driver adapter)*/
+#include "ota_slot/ux_ota_slot.h"	/*BIBOO UX: OTA firmware slot + master-OTA trigger (dongle builds only, see switch BIBOO_UX_OTA_SLOT)*/
+#include "self_ota/ux_self_ota.h"	/*BIBOO UX: dongle self firmware upgrade (dongle builds only, see switch BIBOO_UX_SELF_OTA)*/
 #endif
 
 
@@ -48,6 +50,12 @@ void user_module_init(void)
 #endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
 	ux_host_link_init();	/*BIBOO UX: reset host link (HID 0x05) channel state*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+	ux_ota_slot_init();	/*BIBOO UX: OTA firmware slot (flash 0x20000) + master-OTA trigger*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SELF_OTA)
+	ux_self_ota_init();	/*BIBOO UX: dongle self upgrade (host link 0x70..0x75, A/B bank)*/
 #endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP)
 	ux_spp_init();		/*BIBOO UX: factory SPP data channel (0x33F3/0x33F4, see vendor/user/spp)*/
@@ -83,6 +91,12 @@ void user_module_proc(void)
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
 	ux_host_link_proc();		/*BIBOO UX: async host link command extension point*/
 #endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_OTA_SLOT)
+	ux_ota_slot_proc();		/*BIBOO UX: slot erase / flash writes / deferred responses*/
+#endif
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_SELF_OTA)
+	ux_self_ota_proc();		/*BIBOO UX: dongle self upgrade flash writes / verify / commit*/
+#endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_SPP)
 	ux_spp_proc();			/*BIBOO UX: enable DUT factory SPP notify (CCC) after SMP&SDP done*/
 #endif
@@ -90,7 +104,7 @@ void user_module_proc(void)
 	ux_led_proc();			/*BIBOO UX: non-blocking LED blink engine + mouse activity window*/
 #endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_AUTH)
-	ux_user_data_proc();	/*BIBOO UX: 1s tick LED indication + DUT auth state polling (0x78)*/
+	ux_user_data_proc();	/*BIBOO UX: 1s tick LED indication (0x78 auth polling removed 2026-10-20)*/
 #endif
 #if (BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST)
 	ux_factory_test_proc();	/*BIBOO UX: FT frame bridge / DUT link events / reply timeout*/

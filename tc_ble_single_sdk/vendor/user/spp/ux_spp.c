@@ -88,6 +88,10 @@ void ux_spp_auth_cmd(u8 Tick)
  */
 void ux_spp_get_auth_state_cmd(void)
 {
+	/*clear first: tx_data is a shared static buffer - without this the
+	 *query frame carries the previous 0x77 challenge tick in [1] (the
+	 *DUT ignores it, but it makes DUT UART logs confusing).*/
+	memset(ux_spp_rf.tx_data, 0, SPP_DEVICE_DATA_MAX_LEN);
 	ux_spp_rf.tx_data[SPP_PKT_OFFS_CMD] = SPP_APP_MSG_GET_AUTH_STATE_CMD;
 	ux_spp_send(ux_spp_rf.tx_data, SPP_DEVICE_DATA_MAX_LEN);
 }

@@ -148,6 +148,38 @@
 #define BIBOO_UX_HOST_LINK		1
 #endif
 
+/* OTA slot + master OTA trigger (dongle side, vendor/user/ota_slot): the PC
+ * tool uploads the DUT mouse firmware into the dongle flash slot 0x20000
+ * (host link commands 0x50..0x54) and then triggers the Telink master OTA
+ * (blm_ota.c proc_ota), which pushes the stored image to the connected mouse
+ * over its own BLE link. Requires BIBOO_UX_HOST_LINK (PC channel) and
+ * BLE_MASTER_OTA_ENABLE (master OTA framework, see below).
+ * The mouse (slave) side needs NO change: it is already an OTA server
+ * (BLE_OTA_SERVER_ENABLE=1) - the dongle speaks the very same 20B PDU
+ * protocol the PC uses on the BLE-direct channel.
+ *   1 : enable (default)
+ *   0 : disable */
+#ifndef BIBOO_UX_OTA_SLOT
+#define BIBOO_UX_OTA_SLOT		1
+#endif
+
+
+/* Dongle SELF firmware upgrade (dongle side, vendor/user/self_ota): the PC
+ * tool uploads the DONGLE's own firmware over the host link
+ * (commands 0x70..0x75). The image is written into the spare A/B bank of
+ * the dongle flash (0x20000, since the running image lives at 0x00000) and
+ * only takes effect after an explicit COMMIT, which invalidates the old
+ * bank and reboots. Until COMMIT the running firmware is untouched, so a
+ * failed or abandoned upload leaves the dongle exactly as it was.
+ * Requires BIBOO_UX_HOST_LINK (PC channel) and APP_FLASH_PROTECTION_ENABLE
+ * (the spare bank is inside the locked low 256K, so the module unlocks /
+ * re-locks around the write phase).
+ *   1 : enable (default)
+ *   0 : disable */
+#ifndef BIBOO_UX_SELF_OTA
+#define BIBOO_UX_SELF_OTA		1
+#endif
+
 
 
 /////////////////// MODULE /////////////////////////////////
@@ -155,7 +187,11 @@
 #define ACL_CENTRAL_SIMPLE_SDP_ENABLE		1  //simple service discovery
 
 
-#define BLE_MASTER_OTA_ENABLE			    0  //slave ota test
+/* BIBOO UX: master OTA framework ON - the dongle (BLE master) pushes a
+ * firmware image stored in its own flash (slot 0x20000) to the connected
+ * mouse (OTA server). Driven by vendor/user/ota_slot (BIBOO_UX_OTA_SLOT)
+ * over the host link; see ux_ota_slot.h for the PC command set. */
+#define BLE_MASTER_OTA_ENABLE			    1  //slave ota test
 #define AUDIO_SDM_ENABLE					0  //if using sdm playback, should better disable USB MIC
 
 

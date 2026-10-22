@@ -37,6 +37,11 @@ void ux_host_link_tx(u8 len, u8 *p);
 void ux_host_link_init(void);
 void ux_host_link_proc(void);
 
+/*1 when everything queued for the uplink has really left (fifo drained and
+ *the IN endpoint idle). vendor/user/self_ota uses this to hold its reboot
+ *back until the COMMIT response is on the wire.*/
+u8   ux_host_link_tx_idle(void);
+
 /*att_mouse (blm_att.c): factory-test mouse-report mirror, called at the
  *top level of att_mouse() just like the LED consumer (user_module_att_mouse_led).
  *While the factory-test mode is active (BIBOO_UX_FACTORY_TEST, see

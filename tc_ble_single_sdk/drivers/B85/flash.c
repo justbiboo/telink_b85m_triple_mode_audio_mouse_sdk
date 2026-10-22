@@ -151,8 +151,23 @@ _attribute_ram_code_sec_noinline_ void flash_mspi_write_ram(unsigned char cmd, u
 		mspi_wait();
 	}
 	mspi_high();
+	/*2026-10-22 REVERT of the 2026-10-21 "irqs on during the busy-wait" patch.
+	 *Field evidence (two self-OTA runs, both right after the BEGIN ack, dongle
+	 *8258): (a) the dongle REBOOTED mid-upload - the PC's STATUS poll got
+	 *state=IDLE seconds into the session, which only module init produces;
+	 *(b) the main loop froze outright - the 1s stats print stopped forever and
+	 *the 20s idle watchdog never fired. With IRQs enabled during
+	 *flash_wait_done() an ISR (USB/BLE/timer) can be serviced while the flash
+	 *is still WIP from the erase/program above, and that ISR then executes
+	 *from flash (XIP) against the busy die. The stock Telink order - wait
+	 *INSIDE the irq_disable window - is the only layout where no code can run
+	 *against a busy flash; that is why every flash function here is
+	 *_attribute_ram_code_sec_noinline_. The USB wedge that motivated the patch
+	 *is instead avoided in the self-OTA design by keeping ALL long erases in
+	 *the pre-erase phase (ux_self_ota.c) where the PC is blocked in its BEGIN
+	 *read and no SET_REPORT can be in flight, and by keeping the live DATA
+	 *path page-writes-only (short tPP window).*/
 	flash_wait_done();
-
 	irq_restore(r);
 }
 
@@ -173,7 +188,11 @@ _attribute_ram_code_sec_noinline_ void flash_mspi_write_ram(unsigned char cmd, u
  *              there may be a risk of error in the operation of the flash (especially for the write and erase operations.
  *              If an abnormality occurs, the firmware and user data may be rewritten, resulting in the final Product failure)
  */
-void flash_erase_sector(unsigned long addr)
+/*2026-10-22: ram_code for the self-OTA in-place overwrite (ux_self_ota.c):
+ *COMMIT copies the verified new bank OVER the running bank, and the copy
+ *loop must only call RAM code while the flash text it is executing from is
+ *being replaced. Same body otherwise.*/
+_attribute_ram_code_sec_noinline_ void flash_erase_sector(unsigned long addr)
 {
 	wd_clear(); // add by BLE Team
 
@@ -224,7 +243,7 @@ void flash_read_data(unsigned long addr, unsigned long len, unsigned char *buf)
  *              to avoid this issue, a sram moving operation was added if the buf pointer passed in is flash addr, and the stack cost was defined by STACK_SIZE_FOR_FLASH_DATA.
  *              once the passed buffer len is larger than STACK_SIZE_FOR_FLASH_DATA, the program stalled for user debug.
  */
-void flash_page_program(unsigned long addr, unsigned long len, unsigned char *buf)
+_attribute_ram_code_sec_noinline_ void flash_page_program(unsigned long addr, unsigned long len, unsigned char *buf)
 {
     unsigned int ns = PAGE_SIZE - (addr&(PAGE_SIZE - 1));
     int nw = 0;
