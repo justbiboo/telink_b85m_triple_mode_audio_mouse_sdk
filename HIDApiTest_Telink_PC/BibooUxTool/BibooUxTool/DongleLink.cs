@@ -12,6 +12,10 @@ namespace BibooUxTool
         private const int FeaturePayloadSize = 15;
         private const int InputPayloadSize = 15;
         private IntPtr _h;
+        // 下行快车道状态（2026-10-22）：1=中断 OUT（bh_write），0=EP0 SET_REPORT
+        // （bh_send）。Connect 时用 HID preparsed data 的 OutputReportByteLength
+        // 探测定死（1=描述符有 Output 0x09），发送时零猜测。
+        private int _fastWrite = 0;
         private readonly object _sync = new object();
 
         // 协议层状态
@@ -48,6 +52,11 @@ namespace BibooUxTool
                     return string.IsNullOrEmpty(err) ? "bh_open_default 失败" : err;
                 }
                 _h = h;
+                // 2026-10-22：open 时已用 HID preparsed data 探测 Output report
+                // 能力（OutputReportByteLength），在这里定死下行路径，不再靠
+                // 运行时错误码猜测（hid.c 的 hid_write 对无 OUT pipe 设备不设
+                // 错误串，hid_error() 返回垃圾，猜测不可靠）。
+                _fastWrite = BibooHidNative.bh_query_out_pipe(h) == 1 ? 1 : 0;
                 return null;
             }
         }
@@ -65,6 +74,12 @@ namespace BibooUxTool
         }
 
         /// <summary>发送 15 字节 payload。成功返回 null；失败返回错误描述。</summary>
+        /// <remarks>
+        /// 下行双路径（2026-10-22）：Connect 时用 HID preparsed data 探测
+        /// Output 0x09 member（OutputReportByteLength），有 OUT pipe 走
+        /// bh_write（~0.5ms/帧），否则 EP0 SET_REPORT（bh_send，~2.4ms/帧）。
+        /// 新旧固件双向兼容，路径在连接时定死、发送时零猜测。
+        /// </remarks>
         public string Send(byte[] payload)
         {
             lock (_sync)
@@ -73,6 +88,17 @@ namespace BibooUxTool
                     return "未连接";
                 if (payload == null || payload.Length != FeaturePayloadSize)
                     return "payload 必须为 15 字节";
+
+                if (_fastWrite == 1)
+                {
+                    int rw = BibooHidNative.bh_write(_h, payload, payload.Length);
+                    if (rw == 0)
+                        return null;
+                    // 快车道已验证存在（描述符探测过），write 失败按真实故障
+                    // 上报，不静默降级——静默切 EP0 会把链路劣化藏起来。
+                    string werr = BibooHidNative.LastError();
+                    return string.IsNullOrEmpty(werr) ? "bh_write 失败" : werr;
+                }
 
                 int r = BibooHidNative.bh_send(_h, payload, payload.Length);
                 if (r != 0)
@@ -395,7 +421,7 @@ namespace BibooUxTool
         }
 
         /// <summary>
-        /// 发送一帧 SELF_DATA（偏移感知 [off(4)][len(1)][data(8)]）但不阻塞等响应。
+        /// 发送一帧 SELF_DATA（偏移感知 v2：[off(3)][len(1)][data(9)]）但不阻塞等响应。
         /// seq 取自统一递增器（跳过 0xFF）。返回使用的 seq；发送失败（未连接 /
         /// 长度越界 / HID 写错误）返回 NoSeq。
         /// 用于「灌完即走、靠 STATUS(0x73) 对齐」的窗口式上传：ACK 上行不可靠时，
@@ -404,7 +430,7 @@ namespace BibooUxTool
         /// </summary>
         public byte SendSelfDataNoWait(byte[] bin, uint off, int len)
         {
-            if (bin == null || (long)off + len > bin.Length || len < 1 || len > UxFtProto.SelfDataMax)
+            if (bin == null || (long)off + len > bin.Length || len < 1 || len > UxFtProto.SelfDataMax || off > 0xFFFFFFu)
                 return NoSeq;
 
             byte seq;
@@ -425,7 +451,6 @@ namespace BibooUxTool
             payload[a + UxFtProto.SelfDataOffsOff + 0] = (byte)(off);
             payload[a + UxFtProto.SelfDataOffsOff + 1] = (byte)(off >> 8);
             payload[a + UxFtProto.SelfDataOffsOff + 2] = (byte)(off >> 16);
-            payload[a + UxFtProto.SelfDataOffsOff + 3] = (byte)(off >> 24);
             payload[a + UxFtProto.SelfDataOffsLen] = (byte)len;
             Array.Copy(bin, (int)off, payload, a + UxFtProto.SelfDataOffsData, len);
 
@@ -552,7 +577,7 @@ namespace BibooUxTool
     /// </summary>
     public static class DongleSelfOta
     {
-        /// <summary>每帧数据字节数（15B 帧预算：13 args - 1 len 字节）。</summary>
+        /// <summary>每帧数据字节数（15B 帧预算：13 args - 3 偏移 - 1 len = 9，v2）。</summary>
         public const int ChunkMax = UxFtProto.SelfDataMax;
 
         /// <summary>帧间隔（ms）。灌 flash 比灌 BLE 快得多，4ms 足够，且给 sector 擦除留出窗口。</summary>
@@ -761,22 +786,26 @@ namespace BibooUxTool
                 Log(onLog, "BEGIN 被拒绝：" + DescribeBeginErr(rsp), 2);
                 return -1;
             }
-            Log(onLog, "BEGIN 成功，开始灌入 " + bin.Length + " 字节（8B/帧）…", 3);
+            Log(onLog, "BEGIN 成功，开始灌入 " + bin.Length + " 字节（窗口式 v2：9B/帧×24×2 窗/组 + STATUS 对账）…", 3);
 
-            // ---- DATA（偏移感知帧 + 逐帧等 ACK + STATUS 兜底重对齐）----
-            // 2026-10-21 第三轮修复：上一版「灌完即走、250ms 后才读 ACK」实测只过 16 帧就死。
-            // 根因＝Windows HID 的 SET_REPORT 是 USB 控制传输，其 status 阶段要等主机读回
-            // 输入报告（即 ACK）才算完成；连发多帧却不读 ACK，这些控制传输全卡在 status
-            // 阶段、dongle 的 EP0 被占死，后续 SET_REPORT（含 STATUS 0x73）根本到不了 dongle
-            // ——dongle 侧 rx_ok 恒为 16 可为证。逐帧 SendCommand（发→Pump 读 ACK）每帧都及时
-            // 收尾，EP0 始终空闲。偏移感知帧（ux_self_ota.h）使重发幂等、不重复计数；
-            // 万一 ACK 真丢，走 STATUS 问真实前沿再从缺口重发。
+            // ---- DATA（窗口式上传 v2：9B/帧、每 2 窗（48 帧）一次 STATUS 对账）----
+            // 2026-10-22 第二轮提速（第一轮窗口式实测 2066 B/s，71700B 用 34.7s）：
+            //   a) 帧内 v2：offset 4B→3B（镜像上限 124K 用不到 4 字节），9B/帧（+12.5%）；
+            //   b) 对账摊薄：每 2 窗（48 帧）才做一次同步 STATUS(0x73)（问真实前沿
+            //      recv、快进、缺口幂等续发），对账开销减半；
+            //   c) 窗口 16→24，突发 48 帧 << fifo 64 帧（固件配套扩容），正常不触发
+            //      BUSY/丢帧。
+            // 历史教训（2026-10-21）：纯连发版“窗口 == fifo 深度(16) 且满后无恢复路径”
+            // 曾把 EP0 堵死；现在的组合（突发 < fifo 深度、周期性同步往返排空
+            // EP0/响应队列、STATUS 3 次重试后才中止、缺口幂等续发）保证即使异常也
+            // 有界、可恢复。
             var sw = System.Diagnostics.Stopwatch.StartNew();
             long off = 0;                    // 下一个要发的字节偏移（顺序发送）
-            int stall = 0;                   // 连续 BUSY 计数
-            int sinceStatus = 0;             // 距上次 STATUS 校验的帧数
+            int stallGroups = 0;             // 连续无进展对账组计数
             var prog = new SelfOtaProgress { Total = bin.Length };
-            const int dataTimeoutMs = 1200;  // 单帧 ACK 等待；丢包即走 STATUS 重对齐
+            const int windowFrames = 24;     // 每窗口 DATA 帧数
+            const int windowsPerGroup = 2;   // 每组窗口数（突发 48 帧 < fifo 64）
+            const int maxStallGroups = 4;    // 连续无进展对账组上限
 
             while (off < bin.Length)
             {
@@ -786,109 +815,92 @@ namespace BibooUxTool
                     return 0;
                 }
 
-                int n = (int)Math.Min(ChunkMax, bin.Length - off);
-                byte[] args = new byte[UxFtProto.SelfDataOffsData + n];
-                args[UxFtProto.SelfDataOffsLen] = (byte)n;
-                args[UxFtProto.SelfDataOffsOff + 0] = (byte)(off);
-                args[UxFtProto.SelfDataOffsOff + 1] = (byte)(off >> 8);
-                args[UxFtProto.SelfDataOffsOff + 2] = (byte)(off >> 16);
-                args[UxFtProto.SelfDataOffsOff + 3] = (byte)(off >> 24);
-                Array.Copy(bin, (int)off, args, UxFtProto.SelfDataOffsData, n);
+                long groupStart = off;
 
-                int dr = link.SendCommand(UxFtProto.CmdSelfData, args, dataTimeoutMs, out rsp, out e);
-
-                if (dr == 1 && rsp[UxFtProto.UlOffsStatus] == UxFtProto.StOk)
+                // ---- 组突发：windowsPerGroup × windowFrames 帧只写不读；
+                //      写失败（HID 通道已坏）立即中止 ----
+                for (int w = 0; w < windowsPerGroup && off < bin.Length; w++)
                 {
-                    off += n;
-                    sinceStatus++;
-                    stall = 0;
-                }
-                else if (dr == 1 && rsp[UxFtProto.UlOffsStatus] == UxFtProto.StBusy)
-                {
-                    // flash 写入暂时跟不上（pre-erase 后正常不会，仅防御）：极短等，重发同帧（幂等）
-                    if (++stall > 200)
+                    for (int f = 0; f < windowFrames && off < bin.Length; f++)
                     {
-                        Log(onLog, "Dongle 持续 BUSY，写入通路异常，中止", 2);
+                        int n = (int)Math.Min(ChunkMax, bin.Length - off);
+                        if (link.SendSelfDataNoWait(bin, (uint)off, n) == DongleLink.NoSeq)
+                        {
+                            // 下行 SET_REPORT 本身写失败（不是 ACK 超时）：HID 通道已坏——设备
+                            // 可能已断开/被 Windows 重新枚举/USB 控制端点卡死。直接中止；dongle
+                            // 会话 20s 无数据自动作废，运行中固件未被触碰，重新开始升级即可
+                            //（预擦除幂等）。
+                            Log(onLog, "下行 HID 写失败——Dongle 可能已断开/重新枚举/USB 卡死，中止（运行中固件未被触碰）", 2);
+                            return -1;
+                        }
+                        off += n;
+                    }
+
+                    // 进度条按窗口粒度刷新（对账开销不再计入每帧）
+                    if (onProgress != null)
+                    {
+                        double el = sw.Elapsed.TotalSeconds;
+                        prog.Sent = off;
+                        prog.Percent = (int)(off * 100 / bin.Length);
+                        prog.BytesPerSec = el > 0.001 ? off / el : 0;
+                        prog.EtaSeconds = prog.BytesPerSec > 1 ? (bin.Length - off) / prog.BytesPerSec : -1;
+                        prog.Phase = "上传中";
+                        onProgress(prog);
+                    }
+                }
+
+                // ---- 组收尾：同步 STATUS 对账（同时排空 EP0/响应队列）----
+                byte st = 0, rs = 0; long rv = 0, tt = 0; uint dcrc = 0; string se = null;
+                int qr = 0;
+                for (int a = 0; a < 3; a++)
+                {
+                    qr = QueryStatus(link, out st, out rs, out rv, out tt, out dcrc, out se);
+                    if (qr == 1) break;
+                    System.Threading.Thread.Sleep(30);
+                }
+                if (qr != 1)
+                {
+                    Log(onLog, "STATUS 持续无响应（" + (se ?? "超时") + "），中止（运行中固件未被触碰）", 2);
+                    return -1;
+                }
+                if (st == UxFtProto.SelfStIdle)
+                {
+                    // STATUS 通了但会话已是 IDLE：dongle 已把会话作废（20s 无数据
+                    // 看门狗或 Dongle 重启过）。明确中止让用户重新开始。
+                    Log(onLog, "Dongle 侧会话已作废（20s 无数据看门狗或 Dongle 重启过），中止（运行中固件未被触碰）", 2);
+                    return -1;
+                }
+
+                long frontier = rv;
+                if (frontier >= bin.Length)
+                {
+                    off = bin.Length;        // 已全部写入（丢的只是响应，不用再发）
+                    break;
+                }
+                if (frontier < off)
+                {
+                    // 有帧被丢（正常不会发生；万一 fifo 溢出）：从真实前沿幂等续发
+                    Log(onLog, string.Format(
+                        "STATUS 前沿 {0} 落后发送位置 {1}，从 {2} 续发", frontier, off, frontier), 1);
+                    off = frontier;
+                }
+
+                if (off == groupStart)
+                {
+                    // 整组白发（前沿没动）：连续多组仍无进展则写入通路异常
+                    if (++stallGroups > maxStallGroups)
+                    {
+                        Log(onLog, "连续 " + maxStallGroups + " 组无进展（前沿停在 " + frontier + "），中止", 2);
                         return -1;
                     }
-                    System.Threading.Thread.Sleep(2);
-                    continue;
-                }
-                else if (dr < 0)
-                {
-                    // 下行 SET_REPORT 本身写失败（不是 ACK 超时）：HID 通道已坏——设备
-                    // 可能已断开/被 Windows 重新枚举/USB 控制端点卡死（EP0 卡死时一次
-                    // SET_REPORT 会挂 ~5s 才返回错误，再连发 3 次 STATUS 只会白挂 15s）。
-                    // 直接中止；dongle 会话 20s 无数据自动作废，运行中固件未被触碰，
-                    // 重新开始升级即可（预擦除幂等）。2026-10-22 实测：灌入中途写失败
-                    // 后旧代码仍去问 3 次 STATUS，白等且报错误因被掩盖（只显示最后一次
-                    // STATUS 的发送失败）。
-                    Log(onLog, "下行 HID 写失败（" + (e ?? "?") + "）——Dongle 可能已断开/重新枚举/USB 卡死，中止（运行中固件未被触碰）", 2);
-                    return -1;
                 }
                 else
                 {
-                    // ACK 超时（写入本身成功）或被拒：用 STATUS 问真实前沿，从缺口幂等重发（不动已写区）
-                    byte st = 0, rs = 0; long rv = 0, tt = 0; uint dcrc = 0; string se = null;
-                    int qr = 0;
-                    for (int a = 0; a < 3; a++)
-                    {
-                        qr = QueryStatus(link, out st, out rs, out rv, out tt, out dcrc, out se);
-                        if (qr == 1) break;
-                        System.Threading.Thread.Sleep(30);
-                    }
-                    if (qr != 1)
-                    {
-                        Log(onLog, "DATA 帧无响应且 STATUS 持续无响应（" + (se ?? "超时") + "），中止（运行中固件未被触碰）", 2);
-                        return -1;
-                    }
-                    if (st == UxFtProto.SelfStIdle)
-                    {
-                        // STATUS 通了但会话已是 IDLE：dongle 已把会话作废（20s 无数据
-                        // 看门狗或 Dongle 重启过）。此时继续重发只会每帧收 ERR、前沿恒
-                        // 为 0，永不收敛——明确中止让用户重新开始（运行中固件未被触碰）。
-                        Log(onLog, "Dongle 侧会话已作废（20s 无数据看门狗或 Dongle 重启过），中止（运行中固件未被触碰）", 2);
-                        return -1;
-                    }
-                    long frontier = rv;
-                    if (frontier >= bin.Length)
-                    {
-                        off = bin.Length;       // 已全部写入（丢的只是 ACK）
-                        break;
-                    }
-                    if (frontier > off)
-                        off = frontier;          // 本帧实际已写，跳到缺口
-                    // frontier <= off：重发当前帧（幂等、无害）
-                    Log(onLog, string.Format(
-                        "DATA 帧无响应，STATUS 前沿 {0}/{1}，从 {2} 重发", frontier, bin.Length, off), 1);
-                }
-
-                // 周期性校验前沿一致（每 512 帧），防止静默错位
-                if (sinceStatus >= 512)
-                {
-                    sinceStatus = 0;
-                    byte st = 0, rs = 0; long rv = 0, tt = 0; uint dcrc = 0; string se = null;
-                    if (QueryStatus(link, out st, out rs, out rv, out tt, out dcrc, out se) == 1
-                        && rv != off && rv < bin.Length)
-                    {
-                        Log(onLog, string.Format("前沿回读 {0} 与发送偏移 {1} 不符，跳转到缺口", rv, off), 1);
-                        off = rv;
-                    }
+                    stallGroups = 0;
                 }
 
                 if (paceMs > 0)
                     System.Threading.Thread.Sleep(paceMs);
-
-                if (onProgress != null)
-                {
-                    double el = sw.Elapsed.TotalSeconds;
-                    prog.Sent = off;
-                    prog.Percent = (int)(off * 100 / bin.Length);
-                    prog.BytesPerSec = el > 0.001 ? off / el : 0;
-                    prog.EtaSeconds = prog.BytesPerSec > 1 ? (bin.Length - off) / prog.BytesPerSec : -1;
-                    prog.Phase = "上传中";
-                    onProgress(prog);
-                }
             }
             Log(onLog, string.Format("灌入完成：{0} 字节，{1:F1} B/s，等 Dongle 校验…",
                 bin.Length, bin.Length / Math.Max(0.001, sw.Elapsed.TotalSeconds)), 0);

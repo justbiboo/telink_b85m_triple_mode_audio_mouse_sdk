@@ -1240,26 +1240,19 @@ namespace BibooUxTool
                 int r = DongleSelfOta.Upload(_dongle, _fw.Raw, DongleSelfOta.DefaultPaceMs,
                                              SelfProgress, UiLog, ct);
                 // 2026-10-22：Upload 约定 1=校验通过（可 COMMIT）；0=取消；-1=失败。
-                // 原先写成 if (r != 0) 把 1 也拦截了——校验通过后直接打「升级完成」返回，
-                // 下面的 AskCommit/Commit 成了死代码，COMMIT 从未发出、dongle 永不重启
-                // （11:57/12:00 两次实测：校验通过 7ms 后即「完成」，第二次升级 run 仍是 0x00000）。
-                // 只有 r <= 0（取消/失败）才收尾返回；r == 1 继续走确认+COMMIT。
+                // 历史坑：曾写成 if (r != 0) 把 1 也拦截——COMMIT 成死代码、dongle 永不重启。
+                // 只有 r <= 0（取消/失败）才收尾返回；r == 1 继续 COMMIT。
                 if (r <= 0)
                 {
                     UiSelfFinished(false);
                     return;
                 }
 
-                // 校验通过 → 不可逆步骤，必须先问过用户
-                UiLog("镜像已写入备用 bank 并通过校验。是否现在切换？（不可逆）", 1);
-                bool go = AskCommit();
-                if (!go)
-                {
-                    UiLog("已取消切换。新镜像仍留在备用 bank，Dongle 继续跑原固件；" +
-                          "下次重新上电后可用【查询 Bank】确认布局，或重新走一遍升级。", 1);
-                    UiSelfFinished(false);
-                    return;
-                }
+                // 2026-10-22：按用户要求去掉「是否现在切换」确认框，校验通过后直接
+                // 自动 COMMIT（内部开发/产测工具，链路已多次验证：预擦 fail-closed、
+                // CRC32 校验、失败/取消均不碰运行区；唯一不可逆点是 COMMIT 后的
+                // 覆盖写入，中断仍需烧录器救——与有确认框时风险一致）。
+                UiLog("镜像已写入备用 bank 并通过校验，自动切换到新固件（不可逆，请勿断电）…", 1);
 
                 int c = DongleSelfOta.Commit(_dongle, UiLog);
                 UiSelfFinished(c == 1, c);
@@ -1269,31 +1262,6 @@ namespace BibooUxTool
                 UiLog("自身升级异常：" + ex.Message, 2);
                 UiSelfFinished(false);
             }
-        }
-
-        /// <summary>后台线程 → UI 线程弹 COMMIT 确认框（阻塞后台线程，不卡 UI）。</summary>
-        private bool AskCommit()
-        {
-            if (IsHandleCreated == false)
-                return false;
-            bool go = false;
-            try
-            {
-                Invoke(new Action(() =>
-                {
-                    var dr = MessageBox.Show(this,
-                        "新固件已写入备用 bank 并通过 CRC32 校验。\n\n" +
-                        "点【是】后 Dongle 会把新固件覆盖写入运行区并自动重启\n" +
-                        "（约 20 秒）——写入期间严禁拔插或断电，中断即变砖，\n" +
-                        "只能用 Telink 烧录器救。写入完成自动从新固件启动。\n\n" +
-                        "点【否】保持现状：Dongle 继续跑当前固件，新镜像留在备用 bank。",
-                        "切换 Dongle 固件（不可逆）",
-                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                    go = (dr == DialogResult.Yes);
-                }));
-            }
-            catch (Exception) { return false; }
-            return go;
         }
 
         private void SelfProgress(SelfOtaProgress p)
@@ -1383,9 +1351,20 @@ namespace BibooUxTool
                         continue;                       //USB 还没回来（枚举不到），继续等
 
                     //USB 回来了：读 0x76 确认正在跑的固件，然后把这条连接交给 UI。
+                    //2026-10-22 补充：dongle 复位后 Windows 枚举有个半就绪窗口（能
+                    //open 但 HID 驱动栈未完成启动，实测 0x63→0x64 复位后 2.5s 时
+                    //0x76 写入报 gle=433、后续全 1167）——此时把连接交给 UI 只会拿到
+                    //一个写不动的坏句柄。所以查询未真正应答就丢弃这条连接继续等，
+                    //直到 0x76 真正往返成功才移交（0x62→0x63 那次 5s 等待恰好
+                    //跨过了半就绪窗口，掩盖了这个问题）。
                     uint vHdr, vBuild;
                     int vr = DongleSelfOta.QuerySelfVersion(probe, DongleLink.CommandTimeoutMs,
                                                             out vHdr, out vBuild, out perr);
+                    if (vr != 1)
+                    {
+                        try { probe.Disconnect(); } catch (Exception) { }
+                        continue;
+                    }
                     int waited = (int)sw.ElapsedMilliseconds / 1000;
                     BeginInvoke(new Action(() =>
                     {
@@ -1399,14 +1378,10 @@ namespace BibooUxTool
                             try { _dongle.Disconnect(); } catch (Exception) { }
                         }
                         _dongle = probe;
-                        if (vr == 1)
-                            UiLog(string.Format(
-                                "Dongle 已自动重启回来（等待 {0}s），运行 build 0x{1:X8}（bin 头版本 0x{2:X8}）" +
-                                "——USB 断开又自动回来 = 覆盖 + 复位成功，自动重启打通！", waited, vBuild, vHdr),
-                                3);
-                        else
-                            UiLog("Dongle 已自动重启回来（等待 " + waited + "s）——自动重启打通！" +
-                                  "（0x76 版本查询未应答：" + (perr ?? "无响应") + "）", 3);
+                        UiLog(string.Format(
+                            "Dongle 已自动重启回来（等待 {0}s），运行 build 0x{1:X8}（bin 头版本 0x{2:X8}）" +
+                            "——USB 断开又自动回来 = 覆盖 + 复位成功，自动重启打通！", waited, vBuild, vHdr),
+                            3);
                         SafeConnectUi("已连接 Dongle（升级完成，自动重连）");
                         _btnUsbConnect.Enabled = true;
                     }));

@@ -91,14 +91,16 @@ namespace BibooUxTool
         public const int SelfVerOffsHdr = 0;        // 运行 bank 镜像头 0x02 处的版本 u32 LE
         public const int SelfVerOffsBuild = 4;      // dongle 编译期 build 号 u32 LE
 
-        // SELF_DATA 载荷布局（相对 DlOffsArgs）——与 dongle ux_self_ota.h 对齐：
-        //   args[0..3] = 字节偏移 u32 LE（镜像内绝对偏移，使每帧幂等）
-        //   args[4]    = 本帧数据长度 1..SelfDataMax
-        //   args[5.. ] = 数据
-        public const int SelfDataOffsOff = 0;       // u32 LE 字节偏移
-        public const int SelfDataOffsLen = 4;       // 1..8
-        public const int SelfDataOffsData = 5;
-        public const int SelfDataMax = 8;           // 4 + 1 + 8 = 13 = args 区
+        // SELF_DATA 载荷布局 v2（相对 DlOffsArgs）——与 dongle ux_self_ota.h 对齐
+        // （v2 2026-10-22：不做新旧兼容，PC 与固件同步发版；镜像上限 124K，
+        //   3 字节偏移足够，省下的 1 字节换成数据）：
+        //   args[0..2] = 字节偏移 u24 LE（镜像内绝对偏移，使每帧幂等）
+        //   args[3]    = 本帧数据长度 1..SelfDataMax
+        //   args[4.. ] = 数据
+        public const int SelfDataOffsOff = 0;       // u24 LE 字节偏移
+        public const int SelfDataOffsLen = 3;       // 1..9
+        public const int SelfDataOffsData = 4;
+        public const int SelfDataMax = 9;           // 3 + 1 + 9 = 13 = args 区
 
         // SELF_INFO 响应数据布局（相对 UlOffsData，数据区共 12B）
         // 注意：第 4 个 u32 放不进 12B 数据区，max image 不上线——

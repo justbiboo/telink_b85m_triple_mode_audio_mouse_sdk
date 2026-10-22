@@ -23,6 +23,12 @@ namespace BibooUxTool
         internal static extern int bh_send(IntPtr h, byte[] payload, int payloadLen);
 
         [DllImport(DllName, CallingConvention = CC)]
+        internal static extern int bh_write(IntPtr h, byte[] payload, int payloadLen);
+
+        [DllImport(DllName, CallingConvention = CC)]
+        internal static extern int bh_query_out_pipe(IntPtr h);
+
+        [DllImport(DllName, CallingConvention = CC)]
         internal static extern int bh_read(IntPtr h, byte[] outPayload, int bufLen);
 
         [DllImport(DllName, CallingConvention = CC)]

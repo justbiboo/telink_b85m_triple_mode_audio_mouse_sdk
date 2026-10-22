@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <windows.h>			/*GetLastError - hidapi 失败时经常不设错误串，Win32 错误码才是关键线索*/
+#include <hidsdi.h>				/*HidD_GetPreparsedData - Output report 能力探测（2026-10-22）*/
+#include <hidpi.h>				/*HidP_GetCaps / HIDP_CAPS*/
 #include "BibooHid.h"
 #include "hidapi.h"
 
@@ -24,6 +26,10 @@
 
 typedef struct {
 	hid_device* device;
+	/*1: 报告描述符声明了 Output 0x09 member（新固件，接口有 EP5 OUT pipe），
+	 *WriteFile 能走中断 OUT；0: 旧固件，WriteFile 直接失败，只能 EP0 SET_REPORT。
+	 *由 open_default() 用 HID preparsed data 的 OutputReportByteLength 判定。*/
+	int has_out_pipe;
 } bh_device_t;
 
 static char g_last_err[256] = "no error";
@@ -81,6 +87,33 @@ extern "C" BIBOO_API void* bh_open_default(void)
 	}
 	hid_set_nonblocking(link->device, 0);
 	memcpy(g_opened_path, host_link_path, strlen(host_link_path) + 1);
+
+	/*2026-10-22: 探测 Output report 能力。对同一设备路径再开一个查询句柄
+	 *（hidapi 内部句柄不可达），OutputReportByteLength = 1+15=16 表示描述符
+	 *有 Output 0x09 member（Windows 已建 OUT pipe），= 1（只有 report id 无
+	 *output member）或 0 表示旧固件。探测失败不阻塞打开，按 0 处理（保守走
+	 *EP0，兼容性优先）。不能靠错误码猜测：hid.c 的 hid_write 在无
+	 *write_handle 时不 register_error，hid_error() 返回未初始化数据，实测
+	 *连 %ls 格式化都被打断（17:16 日志 "hid_write failed ("）。*/
+	link->has_out_pipe = 0;
+	{
+		HANDLE qh = CreateFileA(host_link_path, GENERIC_READ | GENERIC_WRITE,
+								FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+								OPEN_EXISTING, 0, NULL);
+		if (qh != INVALID_HANDLE_VALUE) {
+			PHIDP_PREPARSED_DATA ppd = NULL;
+			HIDP_CAPS caps;
+			memset(&caps, 0, sizeof(caps));
+			if (HidD_GetPreparsedData(qh, &ppd) && ppd) {
+				if (HidP_GetCaps(ppd, &caps) == HIDP_STATUS_SUCCESS) {
+					link->has_out_pipe =
+						(caps.OutputReportByteLength >= HLINK_FEATURE_REPORT_SIZE) ? 1 : 0;
+				}
+				HidD_FreePreparsedData(ppd);
+			}
+			CloseHandle(qh);
+		}
+	}
 	return link;
 }
 
@@ -121,6 +154,41 @@ extern "C" BIBOO_API int bh_send(void* h, const unsigned char* payload, int payl
 		return -1;
 	}
 	return 0;
+}
+
+extern "C" BIBOO_API int bh_write(void* h, const unsigned char* payload, int payload_len)
+{
+	bh_device_t* link = (bh_device_t*)h;
+	unsigned char buf[HLINK_FEATURE_REPORT_SIZE];
+	int n;
+	int res;
+
+	if (!link) { set_err("bh_write: not connected"); return -1; }
+	if (!payload || payload_len <= 0) { set_err("bh_write: bad payload"); return -1; }
+
+	memset(buf, 0, sizeof(buf));
+	buf[0] = HLINK_FEATURE_REPORT_ID;
+	n = payload_len > HLINK_FEATURE_PAYLOAD_SIZE ? HLINK_FEATURE_PAYLOAD_SIZE : payload_len;
+	memcpy(&buf[1], payload, n);
+	res = hid_write(link->device, buf, sizeof(buf));
+	if (res < 0) {
+		/*旧固件无 Output 0x09 member -> 无 OUT pipe，hid.c 的 hid_write 在无
+		 *write_handle 时不 register_error，hid_error() 返回未初始化数据（实测
+		 *把 %ls 格式化都打断了，17:16 日志 "hid_write failed ("）——因此这里
+		 *只打 Win32 错误码，不碰 hid_error()。路径选择由 open_default() 的
+		 *preparsed data 探测决定（bh_query_out_pipe），不靠错误码猜测。*/
+		DWORD gle = GetLastError();
+		set_err("hid_write failed (gle=%lu)", (unsigned long)gle);
+		return -1;
+	}
+	return 0;
+}
+
+extern "C" BIBOO_API int bh_query_out_pipe(void* h)
+{
+	bh_device_t* link = (bh_device_t*)h;
+	if (!link) { set_err("bh_query_out_pipe: not connected"); return -1; }
+	return link->has_out_pipe;
 }
 
 static int bh_read_internal(bh_device_t* link, unsigned char* out_payload, int buf_len, int milliseconds)
