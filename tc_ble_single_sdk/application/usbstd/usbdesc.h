@@ -257,7 +257,10 @@ typedef struct {
 typedef struct {
 	USB_HID_Descriptor_HID_t app_hid;
 	USB_Descriptor_Endpoint_t app_in_endpoint;
-	//USB_Descriptor_Endpoint_t SPP_OUT_endpoint;
+	/*2026-10-22: BIBOO host link adds an interrupt OUT endpoint (EP5) for
+	 *the downlink fast path, pairing with the Output 0x09 report member
+	 *- same in+out shape as USB_HID_Descriptor_HID_Somatic_t above*/
+	USB_Descriptor_Endpoint_t app_out_endpoint;
 } USB_HID_Descriptor_HID_APP_t;	
 typedef struct {
 	USB_HID_Descriptor_HID_t somatic_hid;

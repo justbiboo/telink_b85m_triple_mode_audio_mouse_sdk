@@ -277,7 +277,10 @@
 	#define PA5_INPUT_ENABLE		1
 	#define PA6_INPUT_ENABLE		1
 
-	#define	USB_PRINTER_ENABLE 		1
+	/*2026-10-22: printer (SDK template leftover, Telink 7/1/2 bidi) disabled to
+	 *free EP5 for the host link interrupt OUT downlink fast path - the BIBOO
+	 *dongle never used it and no PC tool binds the printer interface.*/
+	#define	USB_PRINTER_ENABLE 		0
 	#define	USB_SPEAKER_ENABLE 		0
 
 	#if ((TL_AUDIO_MODE & TL_AUDIO_MASK_HID_SERVICE_CHANNEL) && (TL_AUDIO_MODE & TL_AUDIO_MASK_DONGLE_TO_STB))//HIDdongle to STB

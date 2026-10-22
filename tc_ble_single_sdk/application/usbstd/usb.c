@@ -870,6 +870,11 @@ void usb_handle_request(u8 data_request) {
             {
                 usb_g_config=1;
             }
+		#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+			/*2026-10-22: arm the host link interrupt OUT (EP5) at first
+			 *configuration - OUT endpoints stay NAK until acked once*/
+			usbhw_data_ep_ack(USB_EDP_APP_OUT);
+		#endif
         }
 		break;
 
@@ -986,6 +991,12 @@ void usb_handle_irq(void) {
 			reg_usb_ep_ctrl(i) = 0;
 			edp_toggle[i]=0;
 		}
+	#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+		/*2026-10-22: rearm the host link interrupt OUT (EP5) after usb reset,
+		 *otherwise the first host WriteFile after (re)enumeration gets NAKed
+		 *forever (same reason as the CDC ack above)*/
+		usbhw_data_ep_ack(USB_EDP_APP_OUT);
+	#endif
 	#if (USB_CDC_ENABLE)
 		/*
 		 * must add ,if endpoint is reset and ack is not set,CDC out_irq will not be generated.
@@ -996,6 +1007,16 @@ void usb_handle_irq(void) {
 	}
 
 	irq = reg_usb_irq;							// data irq need to check
+
+#if (BIBOO_UX_USER_MODULE && BIBOO_UX_HOST_LINK)
+	/*2026-10-22: host link interrupt OUT fast path - a full 16B report
+	 *(15B payload) per transaction, drained and dispatched in irq context
+	 *(same context/chain as the EP0 SET_REPORT path)*/
+	if (irq & FLD_USB_EDP5_IRQ) {
+		reg_usb_irq = FLD_USB_EDP5_IRQ;			// clear ime
+		ux_host_link_ep_out_irq();
+	}
+#endif
 
 #if(USB_CDC_ENABLE)
 	usb_cdc_irq_data_process();

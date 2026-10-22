@@ -98,8 +98,15 @@ static u8  sota_begin_seq;
 /*rx fifo: EP0 irq writes, ux_self_ota_proc drains into flash.
  *Entry = [off(4)][len(1)][data..]; sota_fifo_roff tracks a partially popped
  *frame (only happens if a pop asks for fewer bytes than the frame holds -
- *callers always pop a full frame, so it is effectively per-frame).*/
-#define SOTA_FIFO_FRAMES     16
+ *callers always pop a full frame, so it is effectively per-frame).
+ *2026-10-22: 16 -> 64 frames: the PC now bursts TWO 24-frame DATA windows
+ *(48 v2 9B-payload frames in flight) before it reads back STATUS(0x73)
+ *once. The writer side (~9B/ms in proc) always outruns the PC burst, so
+ *the fifo only absorbs the in-flight burst; overflow is still safe -
+ *overflowed frames are simply missing and the PC re-sends from the STATUS
+ *frontier (idempotent). 64x14B = 896B .bss; if the image runs out of RAM
+ *step back to 48 (and tell the PC to use 1-window recon).*/
+#define SOTA_FIFO_FRAMES     64
 #define SOTA_FIFO_ENTRY      (4 + 1 + UX_SOTA_DATA_MAX)
 
 static u8  sota_fifo[SOTA_FIFO_FRAMES][SOTA_FIFO_ENTRY];
@@ -650,10 +657,12 @@ int ux_self_ota_host_cmd(const u8 *p, u8 *r)
 
 		case UX_SOTA_CMD_DATA:
 		{
+			/*v2 frame: u24 LE offset + len + payload (2026-10-22; the
+			 *image max is 124K so the old 4th offset byte was wasted
+			 *payload space)*/
 			u32 off = (u32)args[UX_SOTA_DATA_OFFS_OFF] |
 					  ((u32)args[UX_SOTA_DATA_OFFS_OFF + 1] << 8) |
-					  ((u32)args[UX_SOTA_DATA_OFFS_OFF + 2] << 16) |
-					  ((u32)args[UX_SOTA_DATA_OFFS_OFF + 3] << 24);
+					  ((u32)args[UX_SOTA_DATA_OFFS_OFF + 2] << 16);
 			u8  len = args[UX_SOTA_DATA_OFFS_LEN];
 
 			if (sota_preerasing)

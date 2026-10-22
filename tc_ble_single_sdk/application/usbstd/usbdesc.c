@@ -717,7 +717,9 @@ const USB_Descriptor_Configuration_t
 				{ { sizeof(USB_Descriptor_Interface_t), DTYPE_Interface },
 					USB_INTF_HOST_LINK,
 					0,
-					1,
+					/*2026-10-22: 2 endpoints now - +EP5 interrupt OUT for the
+					 *downlink fast path (EP5 freed by disabling USB_PRINTER)*/
+					2,
 					HID_CSCP_HIDClass, HID_CSCP_NonBootSubclass,
 					HID_CSCP_NonBootProtocol, NO_DESCRIPTOR
 				},
@@ -728,6 +730,14 @@ const USB_Descriptor_Configuration_t
 					},
 					{ { sizeof(USB_Descriptor_Endpoint_t), DTYPE_Endpoint },
 						ENDPOINT_DIR_IN | USB_EDP_APP_IN,
+						EP_TYPE_INTERRUPT, 0x0010,
+						0x01
+					},
+					/*interrupt OUT (EP5, 16B, 1ms) - pairs with the Output 0x09
+					 *report member; Windows creates the OUT pipe for it and
+					 *WriteFile lands here (see ux_host_link_ep_out_irq)*/
+					{ { sizeof(USB_Descriptor_Endpoint_t), DTYPE_Endpoint },
+						USB_EDP_APP_OUT,
 						EP_TYPE_INTERRUPT, 0x0010,
 						0x01
 					},

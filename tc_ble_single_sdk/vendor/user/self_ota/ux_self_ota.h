@@ -43,9 +43,13 @@
  *                                page writes. An abandoned BEGIN leaves the
  *                                spare bank half-erased but never commits, so
  *                                the running firmware is untouched.
- *            3. DATA     0x71 : args[0] = len 1..12, args[1..12] = bytes.
- *                                Written to flash in the main loop (never in
- *                                the EP0 irq). ACKed frame by frame.
+ *            3. DATA     0x71 : args[0..2] = byte offset u24 LE (image max
+ *                                124K, 3 bytes are enough), args[3] = len,
+ *                                args[4..] = payload bytes (v2, 2026-10-22:
+ *                                was 4-byte offset + 8B; the 3-byte offset
+ *                                squeezes 9B per frame out of the 13-byte
+ *                                args area). Written to flash in the main
+ *                                loop (never in the EP0 irq).
  *            4. END      0x72 : PC is done. The dongle verifies the whole
  *                                image (byte count + "KNLT" + size field +
  *                                CRC32 over size-4 bytes) and reports the
@@ -89,7 +93,7 @@
  * of everything (0x00..0x03 legacy, 0x10..0x15/0x40 FT, 0x50..0x54/0x55 mouse
  * OTA pipe + DevInf relay, 0x60..0x65 retired, 0x80.. reserved). */
 #define UX_SOTA_CMD_BEGIN     0x70    /*args[0..3] = image size u32 LE*/
-#define UX_SOTA_CMD_DATA      0x71    /*args[0] = len 1..12, args[1..12] = data*/
+#define UX_SOTA_CMD_DATA      0x71    /*args[0..2] = u24 LE offset, args[3] = len 1..9, args[4..] = data*/
 #define UX_SOTA_CMD_END       0x72    /*rsp data = verify result snapshot (below)*/
 #define UX_SOTA_CMD_STATUS    0x73    /*rsp data = session snapshot (below)*/
 #define UX_SOTA_CMD_INFO      0x74    /*rsp data = bank layout (below)*/
@@ -111,22 +115,39 @@
 /* bump on every dongle firmware release. History: build 1 = 0x76 query
  * added (first release carrying it); build 2 = first release after the
  * build field was introduced but left at 1 in two consecutive flashes,
- * which made two different images indistinguishable - always bump! */
-#define UX_SOTA_SELF_BUILD      0x00000058u
+ * which made two different images indistinguishable - always bump!
+ * 0x58..0x60 = user's own release bumps (cross-version verify done at 0x58).
+ * 0x61 = windowed upload tuning: 3-byte offset frames (9B), fifo 48.
+ * 0x62 = user's own release bump (v2 frame + auto-COMMIT verified twice).
+ * 0x63 = interrupt OUT downlink fast path: EP5 OUT endpoint + Output 0x09
+ *        report member (printer interface disabled to free EP5); PC probes
+ *        and falls back to EP0 SET_REPORT on this image, so this build can
+ *        be reached by self-OTA without the burning tool.
+ * 0x64 = fix ep_out_irq byte count: read the full 16B OUT report
+ *        ([id]+15B), was 15B - dropped the last payload byte of every
+ *        frame (first victim: KNLT magic at image 0x08).
+ * 0x65 = tighten the master OTA push pacing 4ms -> 2.5ms/PDU (blm_ota.c
+ *        OTA_PUSH_MIN_GAP_US): transparent mouse OTA ~25s -> ~13s; keep
+ *        only if the mouse verifies clean with no packet loss, else
+ *        back off to 3000. */
+#define UX_SOTA_SELF_BUILD      0x00000065u
 
-/* DATA payload layout (relative to the frame args offset, 13-byte args area):
- *   args[0..3] = byte offset of this frame in the image (u32 LE)
- *   args[4]    = payload length     1..UX_SOTA_DATA_MAX
- *   args[5.. ] = payload bytes
+/* DATA payload layout v2 (relative to the frame args offset, 13-byte args
+ * area; v2 2026-10-22 - no compat kept, PC and firmware ship in lockstep):
+ *   args[0..2] = byte offset of this frame in the image (u24 LE; image max
+ *                is 124K so 3 bytes are enough - the 4th byte was wasted
+ *                payload space)
+ *   args[3]    = payload length     1..UX_SOTA_DATA_MAX
+ *   args[4.. ] = payload bytes
  * The offset makes every frame idempotent: a retransmit (lost ack) is simply
  * re-written at the same place and never double-counted. sota_recv only
  * advances when a frame lands exactly at the current frontier, so a gap
  * (frame lost in flight) is caught by STATUS and repaired by the PC resending
  * from sota_recv. */
-#define UX_SOTA_DATA_OFFS_OFF     0       /*u32 LE byte offset*/
-#define UX_SOTA_DATA_OFFS_LEN     4       /*1..UX_SOTA_DATA_MAX*/
-#define UX_SOTA_DATA_OFFS_DATA    5
-#define UX_SOTA_DATA_MAX          8       /*4 + 1 + 8 = 13 = args area*/
+#define UX_SOTA_DATA_OFFS_OFF     0       /*u24 LE byte offset*/
+#define UX_SOTA_DATA_OFFS_LEN     3       /*1..UX_SOTA_DATA_MAX*/
+#define UX_SOTA_DATA_OFFS_DATA    4
+#define UX_SOTA_DATA_MAX          9       /*3 + 1 + 9 = 13 = args area*/
 
 /* session state (UX_SOTA_STS_OFFS_STATE) */
 #define UX_SOTA_ST_IDLE           0       /*no session*/

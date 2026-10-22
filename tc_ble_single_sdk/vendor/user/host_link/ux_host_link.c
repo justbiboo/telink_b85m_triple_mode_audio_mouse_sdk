@@ -102,6 +102,19 @@ static const u8 ux_hlink_report_desc[UX_HLINK_REPORT_DESC_SIZE] = {
 	0x75,0x08,
 	0x95,UX_HLINK_INPUT_PAYLOAD,
 	0x81,0x02,
+	/*2026-10-22: Output member with the SAME report id 0x09 - the Windows
+	 *HID driver routes hid_write()/WriteFile to the EP5 interrupt OUT pipe
+	 *declared in the interface descriptor (~0.5ms/frame vs ~2.4ms EP0
+	 *SET_REPORT, self-OTA downlink speedup 24s -> ~8s for 71620B). Old
+	 *firmware without this member: WriteFile fails and the PC tool falls
+	 *back to SET_REPORT, fully compatible both ways.*/
+	0x85,UX_HLINK_FEATURE_REPORT_ID,
+	0x09,0x01,
+	0x15,0x00,
+	0x26,0xff,0x00,
+	0x75,0x08,
+	0x95,UX_HLINK_FEATURE_PAYLOAD,
+	0x91,0x02,
 	0xc0,
 };
 
@@ -389,6 +402,39 @@ void ux_host_link_rx(u8 len, u8 *p)
 	if (!UX_HLINK_DUMP_MUTED())
 		ux_hlink_dump("[HLINK] RX: ", p, len);
 	#endif
+}
+
+/*---- EP5 interrupt OUT downlink fast path (2026-10-22) ---------------------
+ * Called from usb_handle_irq() when FLD_USB_EDP5_IRQ fires. Same wire format
+ * as the EP0 SET_REPORT path (16B report [0x09][15B payload]) but one full
+ * report arrives per hardware transaction (~0.5ms from Windows WriteFile vs
+ * ~2.4ms EP0 control transfer) - this is the self-OTA downlink speedup.
+ * Context notes: same irq context as the EP0 dispatch chain (kept lightweight,
+ * see the command table comment above); the OUT report id byte is re-read
+ * from the hardware and checked instead of assuming 0x09. Ends with the
+ * standard ack (rearm) so the next OUT packet keeps flowing.
+ *--------------------------------------------------------------------------*/
+void ux_host_link_ep_out_irq(void)
+{
+	/*2026-10-22 fix: the OUT wire report is 16 bytes - [0]=report id 0x09,
+	 *[1..15]=15B payload. Reading only 15 bytes dropped the LAST payload
+	 *byte of every frame and fed one stack byte past buf[] as payload[14];
+	 *the very first victim was the image magic at offset 0x08 (byte 9 of
+	 *frame 0 = the dropped p14), so END verification failed with "no KNLT
+	 *at 0x08". The EP0 SET_REPORT path always assembles the full 16 bytes,
+	 *which is why v2 over EP0 never saw this.*/
+	u8 buf[UX_HLINK_FEATURE_PAYLOAD + 1];
+	u8 i;
+	usbhw_reset_ep_ptr(USB_EDP_APP_OUT);
+	for (i = 0; i < UX_HLINK_FEATURE_PAYLOAD + 1; i++)
+	{
+		buf[i] = usbhw_read_ep_data(USB_EDP_APP_OUT);
+	}
+	usbhw_data_ep_ack(USB_EDP_APP_OUT);
+	if (buf[0] == UX_HLINK_FEATURE_REPORT_ID)
+	{
+		user_module_host_link_rx(UX_HLINK_FEATURE_PAYLOAD, buf + 1);
+	}
 }
 
 

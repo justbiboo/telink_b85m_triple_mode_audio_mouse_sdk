@@ -584,17 +584,21 @@ void proc_ota (void)
 		 *gracefully when the fifo is truly full). */
 		static u32 ota_push_idle_tick = 0;	/*last push, or last dry-fifo tick*/
 		static u8  ota_push_stall_logged = 0;
-		/*BIBOO UX 2026-10-21: pace the push exactly like the BLE-direct
-		 *channel does (OtaForm uses 4ms/PDU there, and that is the channel
-		 *that passes). Without it the dongle packs several PDUs into one
-		 *connection event; the mouse writes each OTA PDU to flash and has a
-		 *tiny ATT RX queue, so the extras are dropped silently - no error
-		 *anywhere, just a hole in adr_index -> OTA_PACKET_LOSS(1). 4ms puts
-		 *the 4981-PDU image at ~20s, well inside the 60s process timeout.
-		 *Note this is NOT part of `allow` on purpose: pacing must not look
-		 *like a gate stall to the watchdog below.*/
+		/*BIBOO UX 2026-10-21: pace the push - without it the dongle packs
+		 *several PDUs into one connection event; the mouse writes each OTA PDU
+		 *to flash and has a tiny ATT RX queue, so the extras are dropped
+		 *silently - no error anywhere, just a hole in adr_index ->
+		 *OTA_PACKET_LOSS(1). Note this is NOT part of `allow` on purpose:
+		 *pacing must not look like a gate stall to the watchdog below.
+		 *2026-10-22 tightened 4000->2500us: with the 10ms connection interval
+		 *this allows up to 4 PDUs per event (inside the txFifo<5 gate),
+		 *pushing the 4980-PDU image from ~25s to ~13s. Validation bar: the
+		 *transparent push must finish with NO OTA_PACKET_LOSS and a clean
+		 *verify; if the mouse drops packets, back off to 3000. (2026-10-21
+		 *note about matching OtaForm's 4ms is historical - the fast path is
+		 *what made this pace revisit.)*/
 		static u32 ota_pace_tick = 0;
-		#define OTA_PUSH_MIN_GAP_US		4000
+		#define OTA_PUSH_MIN_GAP_US		2500
 
 		/*"ready" (not "pending >= 16"): the short tail block needs only the
 		 *last 4 bytes and no further PC frame will arrive, so the old gate

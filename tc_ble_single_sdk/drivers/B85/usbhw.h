@@ -42,6 +42,7 @@ enum {
     USB_EDP_SPP_OUT=5,
 	USB_EDP_SPP_IN=4,
 	USB_EDP_APP_IN = 3,
+	USB_EDP_APP_OUT = 5,	/*BIBOO UX 2026-10-22: host link interrupt OUT (downlink fast path); shares EP5 with the printer/CDC aliases (only one owner may enumerate it)*/
 };
 
 // #defined in the standard spec
