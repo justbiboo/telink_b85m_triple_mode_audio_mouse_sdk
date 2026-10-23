@@ -223,6 +223,18 @@ static bool ux_ft_spp_rx_handle(unsigned char *p_data, unsigned int len)
 {
 	u8 len8 = (len > UX_FT_SPP_SIZE) ? UX_FT_SPP_SIZE : (u8)len;
 
+#if (BIBOO_UX_HOST_LINK)
+	/*BIBOO UX 2026-10-23: K4 PTT edge events (0x23) bypass the factory-test
+	 *gate below - they must reach the PC translator page in DAILY use
+	 *(non-FT mode), not only on the production line. Same 0xE3 fragment
+	 *pipe as the touch stream, but unconditional.*/
+	if (len8 && (p_data[UX_FT_SPP_OFFS_CMD] == UX_FT_DUT_EVT_K4))
+	{
+		ux_ft_evt_fwd_rsp((const u8 *)p_data, len8);
+		return true;
+	}
+#endif
+
 	if (!ux_ft_active || (len8 == 0))
 	{
 		return true;	/*not in factory-test mode: nothing to forward*/

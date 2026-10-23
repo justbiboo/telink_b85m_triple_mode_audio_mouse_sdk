@@ -282,4 +282,17 @@ u8 ux_ft_dut_touch_on(void)
 	return ux_ft_dut_touch_flag;
 }
 
+void ux_ft_dut_k4_report(u8 pressed)
+{
+	u8 rsp[UX_FT_SPP_SIZE];
+
+	/*no stream window here: every K4 edge goes out while the link is up
+	 *(ux_ft_dut_notify checks BLS_LINK_STATE_CONN itself)*/
+	memset(rsp, 0, sizeof(rsp));
+	rsp[UX_FT_SPP_OFFS_CMD] = UX_FT_DUT_EVT_K4;
+	rsp[UX_FT_K4_OFFS_PRESSED] = pressed ? 1 : 0;
+
+	ux_ft_dut_notify(rsp);
+}
+
 #endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST_DUT */

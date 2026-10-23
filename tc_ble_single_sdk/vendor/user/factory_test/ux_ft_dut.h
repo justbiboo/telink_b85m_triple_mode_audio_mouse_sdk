@@ -79,6 +79,13 @@ void ux_ft_dut_touch_report(u8 pressed, u16 pos);
 /* 1 while the touch event stream is active (TOUCH_START received) */
 u8 ux_ft_dut_touch_on(void);
 
+/* K4 push-to-talk edge entry (called by the mouse button handler, AAA_Public.c):
+ * pressed != 0 = K4 down (mic on) / 0 = K4 up (mic off). Unlike the touch
+ * stream it is NOT gated by any 0x20..0x21 window - every K4 edge is notified
+ * as UX_FT_DUT_EVT_K4 (0x23) while the BLE link is up (2026-10-23: private
+ * replacement of the cancelled K4 space-key / K5 Ctrl+Win HID keycodes). */
+void ux_ft_dut_k4_report(u8 pressed);
+
 #endif /* BIBOO_UX_USER_MODULE && BIBOO_UX_FACTORY_TEST_DUT */
 
 #endif /* UX_FT_DUT_H_ */

@@ -145,6 +145,9 @@
 
 /* DUT -> dongle spontaneous notify ([0] of a 0x33F4 frame) */
 #define UX_FT_DUT_EVT_TOUCH         0x22    /*one touch sample*/
+#define UX_FT_DUT_EVT_K4            0x23    /*K4 push-to-talk edge (2026-10-23: always on,
+                                            not gated by the factory-test mode - the dongle
+                                            forwards it to the PC even in daily use)*/
 
 /* UX_FT_DUT_CMD_PING response fields (relative to UX_FT_SPP_OFFS_ARGS) */
 #define UX_FT_PING_OFFS_VERSION     0       /*u8, DUT firmware version*/
@@ -156,6 +159,11 @@
 #define UX_FT_TOUCH_OFFS_POS_L      2       /*touch position, u16 little endian*/
 #define UX_FT_TOUCH_OFFS_POS_H      3
 #define UX_FT_TOUCH_OFFS_SEQ        4       /*sample sequence, wraps at 0xFF*/
+
+/* UX_FT_DUT_EVT_K4 fields (absolute offsets): one frame per K4 press/release
+ * edge; the mouse-side mic PTT (BIBOO_UX_K4_MIC_PTT) runs in parallel on the
+ * same edge, the PC tool starts/stops its recording on this event. */
+#define UX_FT_K4_OFFS_PRESSED       1       /*1 = K4 pressed (mic on) / 0 = released (mic off)*/
 
 
 #endif /* UX_FT_PROTO_H_ */

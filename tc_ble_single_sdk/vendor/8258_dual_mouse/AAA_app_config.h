@@ -138,45 +138,70 @@ static inline void no_printf(const char *format, ...){    return;}
 #define BIBOO_UX_SINE_TEST		0
 #endif
 
-/* ================ BIBOO UX: K4 = keyboard space key ================ */
-/* When enabled, the K4 button sends a keyboard HID space key (keycode 0x2C)
- * press/release through the BLE HID keyboard report characteristic
- * (HID_NORMAL_KB_REPORT_INPUT_DP_H). The dongle receives the notify
- * (att_keyboard) and forwards it to the PC on its USB keyboard endpoint.
- * Report format (8 bytes, kb_data_t): {cnt, ctrl_key, keycode[6]}.
- * NOTE: this also DISABLES the K4 long-press multi-device channel switch
- * (muti_device_change in AAA_Public.c): a >=3s space-key hold would
- * otherwise fire it, disconnect the link and reboot onto another channel.
- * Set to 0 to restore the original K4 channel-switch behavior. */
-#ifndef BIBOO_UX_K4_SPACE_KEY
-#define BIBOO_UX_K4_SPACE_KEY	1
-#endif
-
 /* ================ BIBOO UX: K4 push-to-talk mic ================ */
-/* When enabled, the K4 button works as a push-to-talk key:
+/* When enabled, the K4 button works as a push-to-talk key (mic only, NO
+ * HID keycode is sent):
  *   press   -> start mic capture and stream mSBC voice to the dongle
  *              (same start sequence as the original voice key:
  *               audio_mic_param_init + audio_stick + ui_enable_mic(1))
  *   release -> stop the mic (ui_enable_mic(0))
- * The K5 voice-key toggle (press on / press again off) is kept unchanged;
- * both entries can start/stop the mic. The 60s mic_duration safety limit
- * still applies while held. */
+ * NOTE: while this (or BIBOO_UX_K4_SPACE_KEY) is enabled the K4 long-press
+ * multi-device channel switch (muti_device_change in AAA_Public.c) stays
+ * DISABLED: a >=3s PTT hold while talking would otherwise fire it,
+ * disconnect the link and reboot onto another channel.
+ * The 60s mic_duration safety limit still applies while held. */
 #ifndef BIBOO_UX_K4_MIC_PTT
 #define BIBOO_UX_K4_MIC_PTT		1
 #endif
 
-/* ================ BIBOO UX: K5 = Ctrl+Win push-to-talk ================ */
-/* When enabled, the K5 (voice) button becomes a push-to-talk key (like K4):
- *   press   -> BLE keyboard report with Left-Ctrl + Left-Win modifiers
- *              (ctrl_key byte 0x09, no normal keycode) AND start the mic
- *              (audio_mic_param_init + audio_stick + ui_enable_mic(1))
- *   release -> stop the mic, then (in strict order, so the PC never sees
- *              Ctrl+Win+Enter): release modifiers -> Enter tap (0x28)
+/* ================ BIBOO UX: K4 SPP push-to-talk event ================ */
+/* When enabled (default), every K4 press/release edge ALSO notifies the
+ * dongle as a private-protocol SPP frame (UX_FT_DUT_EVT_K4 0x23, [1]=1
+ * pressed / 0 released, 20B on 0x33F4, see ux_ft_dut_k4_report). The dongle
+ * forwards it to the PC as 0xE3 host link fragments even OUTSIDE the
+ * factory-test mode (ux_factory_test.c bypass), and the BibooUxTool
+ * translator page starts/stops recording on it - the 2026-10-23 private
+ * replacement of the cancelled K4 space-key / K5 Ctrl+Win HID keycodes.
+ * Requires BIBOO_UX_FACTORY_TEST_DUT (the SPP service is always compiled
+ * in; the dongle subscribes the 0x33F4 CCC right after connect). */
+#ifndef BIBOO_UX_K4_SPP_PTT_EVT
+#define BIBOO_UX_K4_SPP_PTT_EVT	1
+#endif
+
+/* ================ BIBOO UX: K4 keyboard space key (keycode CANCELLED) ================ */
+/* K4 HID keycode sending cancelled by product decision 2026-10-23: K4 is a
+ * mic push-to-talk key only. Kept restorable: set to 1 to make K4 also send
+ * a keyboard HID space key (keycode 0x2C) press/release through the BLE HID
+ * keyboard report characteristic (HID_NORMAL_KB_REPORT_INPUT_DP_H, 8-byte
+ * kb_data_t {cnt, ctrl_key, keycode[6]}); the dongle receives the notify
+ * (att_keyboard) and forwards it to the PC on its USB keyboard endpoint. */
+#ifndef BIBOO_UX_K4_SPACE_KEY
+#define BIBOO_UX_K4_SPACE_KEY	0
+#endif
+
+/* ================ BIBOO UX: K5 push-to-talk mic ================ */
+/* When enabled, the K5 (voice) button becomes a push-to-talk key (mic only,
+ * NO HID keycode is sent):
+ *   press   -> start the mic (audio_mic_param_init + audio_stick +
+ *              ui_enable_mic(1))
+ *   release -> stop the mic (ui_enable_mic(0))
  * The original K5 toggle behavior (press on / press again off, in
  * voice_key_check) is bypassed in BLE mode; it is kept for 2.4G mode.
  * The 60s mic_duration safety limit still applies while held. */
+#ifndef BIBOO_UX_K5_MIC_PTT
+#define BIBOO_UX_K5_MIC_PTT		1
+#endif
+
+/* ================ BIBOO UX: K5 Ctrl+Win + Enter keycodes (keycode CANCELLED) ================ */
+/* K5 HID keycode sending cancelled by product decision 2026-10-23: K5 is a
+ * mic push-to-talk key only. Kept restorable: set to 1 to make K5 also press
+ * Left-Ctrl+Left-Win modifiers (ctrl_key byte 0x09, no normal keycode) on
+ * press and tap Enter (0x28) on release (3-report tail in strict order, so
+ * the PC never sees Ctrl+Win+Enter = Windows Narrator; see AAA_Public.c).
+ * These keycode actions ride on the K5 push-to-talk edge detector in
+ * button_process_telink_v21a(). */
 #ifndef BIBOO_UX_K5_CTRL_WIN_MIC
-#define BIBOO_UX_K5_CTRL_WIN_MIC	1
+#define BIBOO_UX_K5_CTRL_WIN_MIC	0
 #endif
 
 /* ================ BIBOO UX: DUT-side factory test ================ */
