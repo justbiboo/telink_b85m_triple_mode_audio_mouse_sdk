@@ -85,7 +85,12 @@ const u8 appearanceChar[5] =
 };
 
 const u16 my_periConnParamUUID = 0x2a04;
-gap_periConnectParams_t my_periConnParameters = {6, 6, 0x3c, 600};
+/* BIBOO UX: aligned with 8208 D21Pro_Tx_Origin (vendor/8208_dual_mouse/
+ * AAA_app_att.c): {6,6,0x2C,300}. The old {6,6,0x3c,600} advertised
+ * slave latency 60 - if a central applies these Peripheral Preferred
+ * Connection Parameters during its GATT discovery, the mouse skips events
+ * for ~450ms and ATT discovery times out ("services cached, chars empty"). */
+gap_periConnectParams_t my_periConnParameters = {6, 6, 0x2C, 300};
 const u8 ConnParametersChar[5] =
 {
     CHAR_PROP_READ,
@@ -476,7 +481,7 @@ u8 DevInf_aaa[15] = {
     0,//5 project name
     3,3,1,//12,13,14, ic lib sdk version (from telink)
     1,1,0,// 9,10,11 mouse sdk version (from telink)
-    0,0,0,// 6,7,8 user fw version advice modify the version number When users have any change 
+    FW_VER_MAJOR,FW_VER_MINOR,0,// 6,7,8 user fw version (major.minor.patch), synced with AAA_app_config_Telink_QFN32.h
 };
 
 

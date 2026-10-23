@@ -202,17 +202,17 @@ _attribute_data_retention_ u8	tbl_scanData_aaa[31] =
 };
 
 #if (BIBOO_UX_FACTORY_TEST_DUT)
-/* ================ BIBOO UX: factory-test ADV template (18B) ================
+/* ================ BIBOO UX: factory-test ADV template (17B) ================
  * Forced at the end of set_adv_scanRsp_data(): same layout as the swift-pair
  * template above, but the manufacturer-specific AD carries the factory
  * signature "0x58 0x62" (right after 0xFF) required by the production
  * dongle (ux_mouse_fwd_adv_auto_pair, vendor/user/mouse_fwd/ux_mouse_fwd.c). */
-_attribute_data_retention_user u8	tbl_ftAdvData_aaa[18] =
+_attribute_data_retention_user u8	tbl_ftAdvData_aaa[17] =
 {
 	0x02, 0x01, 0x05,	// BLE limited discoverable mode and BR/EDR not supported
 	0x03, 0x19, 0xC2, 0x03,	// appearance: mouse (0x03C2)
 	0x03, 0x03, 0x12, 0x18,	// incomplete list of service class UUIDs (0x1812-HID SERVICE)
-	0x06, 0xff, 0x58, 0x62, 0x03, 0x00, 0x80,	// manufacturer specific data, BIBOO UX factory signature
+	0x05, 0xff, 0x58, 0x62, FW_VER_MAJOR, FW_VER_MINOR,	// manufacturer specific data: BIBOO factory signature (0x58 0x62 right after 0xFF, dongle filter only checks these two) + fw version major.minor, same as 8208 D21Pro_Tx_Origin mass-production ADV
 };
 #endif
 
@@ -456,7 +456,13 @@ void connect_params_proc()
     {
         conn_params_cout = 0;
     }
-    else if ((conn_params_cout < PARAMS_GROUP_LEN) && clock_time_exceed(conn_params_tick, 600000))
+    /* BIBOO UX: conn_params_tick is never set outside this function, so the
+     * loop below never fires - same as 8208 D21Pro_Tx_Origin, where
+     * connect_params_proc is dead code behind this conn_params_tick guard.
+     * The old live loop re-requested (6,6,latency,timeout) every 600ms
+     * whenever interval > 7.5ms, colliding with the central's GATT
+     * discovery (same root cause as task_connect, see there). */
+    else if (conn_params_tick && (conn_params_cout < PARAMS_GROUP_LEN) && clock_time_exceed(conn_params_tick, 600000))
     {
     	my_printf_aaa("conn param update--1 \n");
         conn_params_tick = clock_time() | 1;
@@ -468,7 +474,13 @@ void connect_params_proc()
     {
         conn_params_cout = 0;
     }
-    else if ((conn_params_cout < PARAMS_GROUP_LEN) && clock_time_exceed(conn_params_tick, 600000))
+    /* BIBOO UX: conn_params_tick is never set outside this function, so the
+     * loop below never fires - same as 8208 D21Pro_Tx_Origin, where
+     * connect_params_proc is dead code behind this conn_params_tick guard.
+     * The old live loop re-requested (6,6,latency,timeout) every 600ms
+     * whenever interval > 7.5ms, colliding with the central's GATT
+     * discovery (same root cause as task_connect, see there). */
+    else if (conn_params_tick && (conn_params_cout < PARAMS_GROUP_LEN) && clock_time_exceed(conn_params_tick, 600000))
     {
         conn_params_tick = clock_time() | 1;
         bls_l2cap_requestConnParamUpdate(ConParams[conn_params_cout].Min, ConParams[conn_params_cout].Max, ConParams[conn_params_cout].latency, ConParams[conn_params_cout].timeout);
@@ -575,10 +587,19 @@ int PC_enter_sleep(void *p)
 
 void	task_connect(u8 e, u8 *p, int n)
 {
-	//if(pair_flag==0)
-	//{
-		bls_l2cap_requestConnParamUpdate(6, 6, 0x2c, 300);
-	//}
+	if (pair_flag)
+	{
+		/* BIBOO UX: port from 8208 D21Pro_Tx_Origin (vendor/8208_dual_mouse/
+		 * AAA_app.c task_connect): in pairing mode request GENTLE params
+		 * (10-20ms, latency 4) and throttle update requests 1s past connection
+		 * creation. The old unconditional (6,6,0x2c,300) fired right inside
+		 * the peer's GATT discovery window - once the central accepted
+		 * latency 44, the slave woke only every ~337ms and ATT discovery
+		 * timed out, so Windows cached "services yes / characteristics no"
+		 * and the BLE OTA tool could never enumerate SPP/OTA chars. */
+		bls_l2cap_requestConnParamUpdate(8, 16, 4, 200);
+		bls_l2cap_setMinimalUpdateReqSendingTime_after_connCreate(1000);
+	}
 
     connect_begin_tick = clock_time() | 1;
     clear_fifo();
@@ -654,6 +675,44 @@ void	task_connect(u8 e, u8 *p, int n)
     }
 #endif
 
+}
+
+/* ================ BIBOO UX(2026-10-22) diag: conn-param update loggers ================
+ * BLE-direct-PC drawing-stutter investigation. Two notification callbacks:
+ *  - task_conn_update_req (BLT_EV_FLAG_CONN_PARA_REQ): the PC (master) initiates
+ *    the LL connection-param-req procedure - print what it ASKS for;
+ *  - task_conn_update_done (BLT_EV_FLAG_CONN_PARA_UPDATE): an update took
+ *    EFFECT (event data: tlk_contr_evt_connParaUpdate_t) - print the final
+ *    params, no matter who initiated (mouse's own request granted/denied, or
+ *    the PC's unilateral LL update).
+ * Read together with the mouse's own "conn param update--1" request prints
+ * (connect_params_proc) and the 3s "poll" line (AAA_main.c), this pins down
+ * what Windows actually granted:
+ *  - interval held at 15/30ms -> main_loop samples the sensor at
+ *    interval*1250 (time_interval logic) -> jerky drawing at that cadence;
+ *  - latency 0x2c/0x10 granted -> reports burst-dump every 125~340ms once
+ *    the idle timer releases bls_pm_setManualLatency(0).*/
+void	task_conn_update_req(u8 e, u8 *p, int n)
+{
+	(void)e; (void)n;
+#if UART_PRINT_DEBUG_ENABLE
+	tlk_contr_evt_connParaReq_t *req = (tlk_contr_evt_connParaReq_t *)p;
+	my_printf_aaa("conn_update_req from master: interval=%x(%dms), latency=%x, timeout=%x\r\n",
+				  req->interval, (req->interval * 5) / 4, req->latency, req->timeout);
+#else
+	(void)p;
+#endif
+}
+void	task_conn_update_done(u8 e, u8 *p, int n)
+{
+	(void)e; (void)n;
+#if UART_PRINT_DEBUG_ENABLE
+	tlk_contr_evt_connParaUpdate_t *upd = (tlk_contr_evt_connParaUpdate_t *)p;
+	my_printf_aaa("conn_update done: interval=%x(%dms), latency=%x, timeout=%x\r\n",
+				  upd->conn_interval, (upd->conn_interval * 5) / 4, upd->conn_latency, upd->conn_timeout);
+#else
+	(void)p;
+#endif
 }
 
 
@@ -1108,8 +1167,12 @@ void user_init_normal(void)
     bls_app_registerEventCallback(BLT_EV_FLAG_ADV_DURATION_TIMEOUT, &app_switch_to_indirect_adv);
 
 
-    //bls_app_registerEventCallback(BLT_EV_FLAG_CONN_PARA_REQ, &task_conn_update_req);
-    //bls_app_registerEventCallback(BLT_EV_FLAG_CONN_PARA_UPDATE, &task_conn_update_done);
+    /*BIBOO UX(2026-10-22) diag: log both sides of every conn-param negotiation
+     *(see the task_conn_update_req/done definitions above); print-only callbacks,
+     *the stack response behaviour is unchanged - to remove, re-comment the two
+     *lines and drop the two functions.*/
+    bls_app_registerEventCallback(BLT_EV_FLAG_CONN_PARA_REQ, &task_conn_update_req);
+    bls_app_registerEventCallback(BLT_EV_FLAG_CONN_PARA_UPDATE, &task_conn_update_done);
 
     //bls_app_registerEventCallback (BLT_EV_FLAG_ENCRYPTION_CONN_DONE, &task_encry_done);		//¼????ê³?
     //bls_app_registerEventCallback (BLT_EV_FLAG_PAIRING_END, &task_smp_pair_end);

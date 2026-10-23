@@ -31,7 +31,10 @@
 #ifndef _AAA_24G_RF_FRAME_H_
 #define _AAA_24G_RF_FRAME_H_
 
-#define MOUSE_DATA_LEN_AAA  4	//BIBOO UX: must stay in sync with AAA_app_config_Telink_QFN32.h (and the dongle end = 4)
+#define MOUSE_DATA_LEN_AAA  4	/*BIBOO UX: must stay in sync with AAA_app_config_Telink_QFN32.h (and the
+				 *dongle end = 4). A/B test 2026-10-22: reverted to the baseline 6 for the
+				 *BLE-direct-PC drawing stutter - stutter UNCHANGED, report format ruled out,
+				 *so back to the production 4-byte format.*/
 
 enum
 {

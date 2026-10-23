@@ -57,11 +57,24 @@
     //-----------------------product function referance---------------------------------------
 
 	#define DEVICE_APPEARANCE      0X03C2// 0X0XC1 KEYBOARD 0X03C2 MOUSE
-    #define DEVICE_NAME_AAA   "AI_58M"//"58_T_M"//58:8258  32: QFN32
+    #define DEVICE_NAME_AAA   "Biboo_Auido"//"58_T_M"//58:8258  32: QFN32
+
+    // Firmware version - only change these two numbers, USER_BLE_VERSION_AAA is auto-generated
+    // (BIBOO UX: ported from 8208 D21Pro_Tx_Origin mass-production; consumed by DevInf_aaa[]
+    // in AAA_app_att.c (GATT OTA-service DevInf readback) and by the factory ADV manufacturer
+    // data in AAA_app.c tbl_ftAdvData_aaa[] (BLE scan version, tool background scan))
+    #define FW_VER_MAJOR           1
+    #define FW_VER_MINOR           0
+    #define _VER_STR_HELPER(x)     #x
+    #define _VER_STR(x)            _VER_STR_HELPER(x)
+    #define USER_BLE_VERSION_AAA   "v" _VER_STR(FW_VER_MAJOR) "." _VER_STR(FW_VER_MINOR)
 
     #define MOUSE_PIPE1_DATA_WITH_DID	1//If you want to fit the old hamster dongle (firmware version :v5.3) it must set 0
 
-    #define MOUSE_DATA_LEN_AAA	4   //BIBOO UX: must match the dongle end (ble_master_kma_dongle = 4: btn+s8x+s8y+wheel); the old hamster dongle (v5.3) also uses 4
+    #define MOUSE_DATA_LEN_AAA	4   /*BIBOO UX: must match the dongle end (ble_master_kma_dongle = 4:
+					//btn+s8x+s8y+wheel); the old hamster dongle (v5.3) also uses 4.
+					//A/B test 2026-10-22: baseline 6 tried for the BLE-direct-PC drawing
+					//stutter - stutter UNCHANGED, format ruled out, back to production 4.*/
 
     //#define OTA_ENABLE_AAA     1
     #define BLE_OTA_SERVER_ENABLE  1
