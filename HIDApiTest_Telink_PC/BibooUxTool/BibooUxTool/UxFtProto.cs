@@ -232,6 +232,7 @@ namespace BibooUxTool
 
         // DUT 主动 notify 事件（[0]）
         public const byte DutEvtTouch = 0x22;  // 一次触摸采样
+        public const byte DutEvtK4 = 0x23;     // K4 语音键按下/松开边沿（常发，不经产测模式门控，2026-10-23）
 
         // PING 响应字段（相对 SppOffsArgs）
         public const int PingOffsVersion = 0;
@@ -243,6 +244,10 @@ namespace BibooUxTool
         public const int TouchOffsPosL = 2;    // u16 位置，小端
         public const int TouchOffsPosH = 3;
         public const int TouchOffsSeq = 4;     // 采样序号（0xFF 回绕）
+
+        // K4 事件字段（绝对偏移）：鼠标端同一边沿还开/关麦（BIBOO_UX_K4_MIC_PTT），
+        // PC 端收到后开始/停止录音（翻译页自动录音的私有触发源，替代已取消的 HID 键值）
+        public const int K4OffsPressed = 1;    // 1=按下（开麦）/ 0=松开（停麦）
 
         // ===== factory 原生鉴权命令（镜像 ux_spp.h，SPP 通道 0x77/0x78） =====
         public const byte AuthCmd = 0x77;        // [1]=Tick → [2]=AuthResult*
@@ -296,6 +301,19 @@ namespace BibooUxTool
             pressed = spp[TouchOffsPressed] != 0;
             pos = spp[TouchOffsPosL] | (spp[TouchOffsPosH] << 8);
             seq = spp[TouchOffsSeq];
+            return true;
+        }
+
+        /// <summary>解析 0x23 K4 语音键事件（20B SPP 帧，经 0xE3 重组后）。</summary>
+        public static bool ParseK4(byte[] spp, out bool pressed)
+        {
+            pressed = false;
+            if (spp == null || spp.Length < SppSize)
+                return false;
+            if (spp[SppOffsCmd] != DutEvtK4)
+                return false;
+
+            pressed = spp[K4OffsPressed] != 0;
             return true;
         }
 

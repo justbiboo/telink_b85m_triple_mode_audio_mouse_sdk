@@ -20,6 +20,9 @@ namespace BibooUxTool
     /// 音频源二选一：USB Audio（鼠标当 USB 声卡 / 普通麦克风均走标准 WaveIn），
     /// 或「蓝牙输入（BLE 直连）」—— 经语音流特征 0xFFF0/0xB03E 收 57B mSBC 帧，
     /// MsbcDecoder 解成 240B PCM 后喂同一 VAD/识别/翻译管线（与 SDK ux_voice_dec 同口径）。
+    /// 鼠标语音键（K4）自动录音：两个触发场景自动选择（鼠标 BLE 链路独占，天然互斥）——
+    ///   ① 鼠标连 Dongle：K4 边沿经 SPP 0x33F4 → dongle 0xE3 → DongleLink，自动开始/停止 USB 录音；
+    ///   ② PC 蓝牙直连鼠标：K4 边沿直接从 0x33F4 到 BleDirectLink.SppReceived，自动启用/停用蓝牙语音。
     /// </summary>
     public sealed class TranslatorForm : Form
     {
@@ -65,13 +68,19 @@ namespace BibooUxTool
         // ---------- 录音模式（默认）：按下开始 → 累积 PCM → 停止后整段送模型 ----------
         private CheckBox _chkRealtime;      // 勾上才走旧的「VAD 自动断句实时字幕」
 
-        // ---------- 鼠标语音键（K5）自动录音 ----------
-        // 硬件端在 BLE 模式下按 K5 发 Ctrl+Win 修饰符 + 开麦，松开时先释放修饰符再补一发 Enter。
-        // 这里用 Raw Input 监听这两个时刻：Ctrl+Win → 自动开始录音；Enter → 自动停止 → 翻译 → 朗读。
+        // ---------- 鼠标语音键（K4）自动录音 ----------
+        // 硬件端 BLE 模式下按 K4：开麦推流 + 发 SPP 0x23 按下事件；松开停麦 + 发松开事件。
+        // 本页经 Dongle Host Link 收这两个边沿：按下 → 自动开始录音；松开 → 停止 → 翻译 → 朗读。
         private CheckBox _chkPtt;           // 勾上才启用鼠标语音键自动录音
         private Label _lblPtt;              // 监听/录音状态行
-        private KeyboardPttWatcher _ptt;
-        private bool _pttRecording;         // 当前这段录音是否由语音键触发（决定 Enter 是否收尾）
+        // K4 语音键自动录音（2026-10-23 起私有协议版）：鼠标 SPP 0x33F4 发 0x23 边沿事件
+        // → dongle 转为 0xE3 分片 → 本页 DongleLink 重组 → 开始/停止录音。
+        // 替代已取消的 K5 Ctrl+Win/Enter HID 键值触发（KeyboardPttWatcher 已退役，类保留）。
+        private DongleLink _pttLink;                        // dongle Host Link（K4 事件通道，独占）
+        private System.Windows.Forms.Timer _pttLinkTimer;   // 50ms Pump 排空 + 断线重连
+        private int _pttLinkRetryTick;                      // 上次重连尝试（TickCount）
+        private bool _pttRecording;         // 当前这段录音是否由语音键触发（决定松开 K4 是否收尾）
+        private bool _pttFromBle;           // 本次语音键录音由 BLE 直连触发（dongle 断链兜底不误伤）
 
         // 译文朗读（TTS：sherpa-onnx Kokoro int8，中 + 英，103 音色）
         private TtsEngine _tts;
@@ -274,10 +283,18 @@ namespace BibooUxTool
             _vad.LevelUpdated -= OnLevelUpdated;
             _capture.Dispose();
             if (_tts != null) { _tts.Stop(); _tts.Dispose(); _tts = null; }
-            if (_ptt != null) { _ptt.Dispose(); _ptt = null; }
-            // 蓝牙输入：停巡检 → 摘语音事件 → 关 notify（含 0xB03E CCCD）+ 释放 PC 侧对象 → Dispose
+            // K4 语音键通道：停 Pump → 摘事件 → 释放 dongle HID 句柄（与其它模态页互斥的独占通道）
+            try { if (_pttLinkTimer != null) _pttLinkTimer.Stop(); } catch (Exception) { }
+            if (_pttLink != null)
+            {
+                try { _pttLink.SppFrameEvent -= OnPttSppFrame; } catch (Exception) { }
+                _pttLink.Dispose();
+                _pttLink = null;
+            }
+            // 蓝牙输入：停巡检 → 摘语音/ SPP 事件 → 关 notify（含 0xB03E CCCD）+ 释放 PC 侧对象 → Dispose
             try { if (_bleLinkTimer != null) _bleLinkTimer.Stop(); } catch (Exception) { }
             try { _ble.VoiceReceived -= OnBleVoiceFrame; } catch (Exception) { }
+            try { _ble.SppReceived -= OnBleSppFrame; } catch (Exception) { }
             _bleVoiceActive = false;
             _running = false;
             try { _ble.Disconnect(); } catch (Exception) { }
@@ -580,8 +597,18 @@ namespace BibooUxTool
             }
             else
             {
-                // 掉线/手动断开：蓝牙语音随链路一起收尾（不停 USB——它本来就没开）
-                if (_bleVoiceActive)
+                // 掉线/手动断开：蓝牙语音随链路一起收尾（不停 USB——它本来就没开）。
+                // K4 触发的录音正按住时断链：松开边沿随链路一起丢（到不了 0x33F4），
+                // 走 HandlePttReleased → OnStop 提前收尾（整段送模型 + 统一落状态），
+                // 与 dongle 通道断链兜底（OnPttLinkTimer）对称，防 300s 挂起。
+                // （订阅失败也是 _pttRecording 挂 true 的一种来路，故不判 _bleVoiceActive；
+                //   HandlePttReleased 内部有 _running 门槛，不会误碰没在跑的采集。）
+                if (_pttRecording && _pttFromBle)
+                {
+                    LogLine("自动录音：蓝牙链路断开，本段录音提前收尾。", UiTheme.Warn);
+                    HandlePttReleased();
+                }
+                else if (_bleVoiceActive)
                     StopBleVoiceSync("BLE 链路断开");
 
                 _lblBleState.Text = _blePairedMode
@@ -761,26 +788,37 @@ namespace BibooUxTool
         /// <summary>【启用语音】：订阅 0xB03E notify，把蓝牙语音设为当前音源。</summary>
         private async void OnBleVoiceOn(object sender, EventArgs e)
         {
+            await TryStartBleVoiceAsync();
+        }
+
+        /// <summary>
+        /// 启用蓝牙语音的核心异步路径（可等待）：前置检查 → CCCD 订阅 → 接管线。
+        /// 返回是否启用成功（含“已在采集”视为成功，幂等）。
+        /// K4 自动录音也走这里：await 返回后可判“松开沿是否已先到”。
+        /// </summary>
+        private async Task<bool> TryStartBleVoiceAsync()
+        {
             if (_bleVoiceActive)
-                return;
+                return true;
             if (!_ble.IsLinkVerified)
             {
                 LogLine("BLE 未连接（或活性校验未过），无法启用语音。", UiTheme.Danger);
-                return;
+                return false;
             }
             if (_running)
             {
                 LogLine("USB 音频采集中：输入源二选一，请先点【停止采集】再启用蓝牙语音。", UiTheme.Warn);
-                return;
+                return false;
             }
 
             string err = await _ble.StartVoiceAsync();
             if (err != null)
             {
                 LogLine("启用蓝牙语音失败：" + err, UiTheme.Danger);
-                return;
+                return false;
             }
             StartBleVoiceSync();
+            return true;
         }
 
         /// <summary>【停用语音】：与【停止采集】同一条收尾路径（录音模式下照样送模型）。</summary>
@@ -1035,8 +1073,9 @@ namespace BibooUxTool
             _lblMode.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
             _lblMode.TextAlign = ContentAlignment.MiddleLeft;
 
-            // 鼠标语音键自动录音：勾上后由 Raw Input 监听（Ctrl+Win 开始 / Enter 结束），
-            // 不要求本窗口在前台——用户可以在微信/游戏里直接按 K5 说话。
+            // 鼠标语音键自动录音：勾上后经 Dongle 私有协议收 K4 按下/松开边沿
+            // （鼠标 SPP 0x33F4 → dongle 0xE3 → 本页 DongleLink），不要求本窗口在前台——
+            // 用户可以在微信/游戏里直接按住 K4 说话。
             _chkPtt = new CheckBox();
             _chkPtt.Text = "鼠标语音键自动录音";
             _chkPtt.ForeColor = UiTheme.TextSub;
@@ -1120,6 +1159,7 @@ namespace BibooUxTool
             _ble.PairedWatchStateChanged += OnBlePairedWatchState;
             _ble.ScanCompleted += OnBleScanCompleted;
             _ble.VoiceReceived += OnBleVoiceFrame;   // 第二步：mSBC 帧 → PCM → 翻译管线
+            _ble.SppReceived += OnBleSppFrame;       // K4 边沿（BLE 直连场景：0x33F4 上的 0x23 帧）
 
             _bleLinkTimer = new System.Windows.Forms.Timer();
             _bleLinkTimer.Interval = 2500;   // 与「蓝牙连接」页一致：2.5s 一次 ATT 活性读
@@ -1770,54 +1810,190 @@ namespace BibooUxTool
             UpdatePttUi();
         }
 
-        // ---------- 鼠标语音键（K5：Ctrl+Win 开始 / Enter 结束） ----------
+        // ---------- 鼠标语音键（K4：经 Dongle 私有协议 SPP 0x23 边沿） ----------
 
-        /// <summary>窗体消息分流：Raw Input 的 WM_INPUT 交给监听器，其余照常处理。</summary>
-        protected override void WndProc(ref Message m)
+        /// <summary>
+        /// 进入页面后打开 Dongle Host Link 通道：K4 按下/松开经鼠标 SPP(0x33F4)
+        /// → dongle 0xE3 分片 → 本页 SppFrameEvent 到达（不经产测模式，日常可用）。
+        /// 与产测页等模态页互斥（HID 通道独占），页面关闭即释放。
+        /// </summary>
+        private void InitPttLink()
         {
-            if (m.Msg == KeyboardPttWatcher.WM_INPUT && _ptt != null)
-                _ptt.ProcessMessage(m.LParam);
-            base.WndProc(ref m);
-        }
-
-        /// <summary>进入页面后挂上 Raw Input 监听。窗口不在前台也能收到按键（RIDEV_INPUTSINK）。</summary>
-        private void InitPttWatcher()
-        {
-            if (_ptt != null || IsDisposed || !IsHandleCreated)
+            if (_pttLink != null || IsDisposed)
                 return;
 
-            _ptt = new KeyboardPttWatcher(Handle);
-            _ptt.Enabled = _chkPtt == null || _chkPtt.Checked;
-            _ptt.Pressed += OnPttPressed;
-            _ptt.Released += OnPttReleased;
+            _pttLink = new DongleLink();
+            _pttLink.SppFrameEvent += OnPttSppFrame;
 
-            if (_ptt.IsRegistered)
+            _pttLinkTimer = new System.Windows.Forms.Timer();
+            _pttLinkTimer.Interval = 50;   // 与产测页一致：50ms 排空上行帧
+            _pttLinkTimer.Tick += OnPttLinkTimer;
+            _pttLinkTimer.Start();
+            UpdatePttUi();
+        }
+
+        /// <summary>50ms：已连接则循环排空上行帧；未连接每 2s 静默重连一次（dongle 可后插）。</summary>
+        private void OnPttLinkTimer(object sender, EventArgs e)
+        {
+            if (_pttLink == null || IsDisposed)
+                return;
+
+            if (!_pttLink.IsConnected)
             {
-                LogLine("自动录音已就绪：按鼠标语音键（BLE 模式）Ctrl+Win 开始，松开 Enter 结束并翻译朗读。"
-                      + "本窗口不在前台也有效。", UiTheme.TextSub);
+                int now = Environment.TickCount;
+                if (now - _pttLinkRetryTick < 2000)
+                    return;
+                _pttLinkRetryTick = now;
+
+                string err = _pttLink.Connect();
+                if (err == null)
+                {
+                    string path = _pttLink.GetOpenedPath();
+                    LogLine("自动录音已就绪：按住鼠标 K4 说话，松开自动停止并翻译朗读。本窗口不在前台也有效。"
+                          + (string.IsNullOrEmpty(path) ? "" : "（Dongle " + ShortDevicePath(path) + "）"),
+                        UiTheme.TextSub);
+                }
+                // 连接失败（dongle 未插/被其它页面占用）静默重试，不打扰用户（状态行有提示）
+                UpdatePttUi();
+                return;
+            }
+
+            for (int i = 0; i < 64; i++)
+            {
+                int r = _pttLink.Pump(0);
+                if (r < 0)
+                {
+                    // dongle 拔出等：断开进入重连节奏；若这段录音由 dongle 通道触发（非 BLE
+                    // 直连），提前收尾防 300s 挂起——鼠标 BLE 链路独占，两来源不会同时活跃，
+                    // 但 PC 侧两个通道可并存，须按来源区分，BLE 触发的录音不受 dongle 断链影响。
+                    _pttLink.Disconnect();
+                    if (_pttRecording && !_pttFromBle)
+                    {
+                        LogLine("自动录音：Dongle 通道断开，本段录音提前收尾。", UiTheme.Warn);
+                        HandlePttReleased();
+                    }
+                    UpdatePttUi();
+                    return;
+                }
+                if (r == 0)
+                    break;
+            }
+        }
+
+        /// <summary>SppFrameEvent（UI 线程）：0x23 K4 边沿 → 开始/结束录音（复用原 PTT 录音链路）。</summary>
+        private void OnPttSppFrame(byte[] spp)
+        {
+            bool pressed;
+            if (!UxFtProto.ParseK4(spp, out pressed))
+                return;
+
+            if (pressed)
+                OnPttPressed();
+            else
+                OnPttReleased();
+        }
+
+        // ---------- K4 语音键（BLE 直连场景：鼠标 → PC 的 0x33F4 SPP 帧） ----------
+        // 鼠标固件不区分中心设备：ux_ft_dut_k4_report 只要 BLE 连着就发 0x23 帧，
+        // 所以 dongle 场景（0x33F4 → dongle 0xE3 → DongleLink）与直连场景
+        // （0x33F4 → BleDirectLink.SppReceived）是同一段帧的两个入口，互斥共存：
+        // 鼠标 BLE 链路独占，连 PC 就不连 dongle，反之亦然。
+        // 直连场景的目标音源是蓝牙语音流（0xB03E mSBC，与 USB 采集二选一），
+        // 故按下沿的动作是自动【启用语音】而不是 USB 录音。
+
+        /// <summary>
+        /// SppReceived 回调（WinRT 线程池线程）：只认 0x23 K4 边沿帧，
+        /// 其它 SPP 帧（鉴权 0x77/0x78 等）与本页无关，切回 UI 线程后再动采集状态。
+        /// </summary>
+        private void OnBleSppFrame(byte[] frame)
+        {
+            if (IsDisposed)
+                return;
+
+            bool pressed;
+            if (!UxFtProto.ParseK4(frame, out pressed))
+                return;
+
+            try
+            {
+                if (pressed)
+                    BeginInvoke(new Action(OnBleK4Pressed));
+                else
+                    BeginInvoke(new Action(OnBleK4Released));
+            }
+            catch { /* 窗口关闭竞态 */ }
+        }
+
+        /// <summary>K4 按下（直连）：空闲时自动【启用语音】，mSBC 流入翻译管线。</summary>
+        private async void OnBleK4Pressed()
+        {
+            if (IsDisposed || _chkPtt == null || !_chkPtt.Checked)
+                return;
+
+            if (_bleVoiceActive)
+            {
+                // 蓝牙语音已在跑（手动启用/实时字幕）：流已在管线里，直接说话即可
+                LogLine("自动录音：蓝牙语音已在采集中，本次 K4 无须再启用（直接说话即可）。", UiTheme.TextSub);
+                return;
+            }
+            if (_running)
+            {
+                LogLine("自动录音：USB 音频采集中，本次 K4 忽略（蓝牙语音与 USB 采集二选一）。", UiTheme.Warn);
+                return;
+            }
+            if (_busy)
+            {
+                LogLine("自动录音：上一段还在识别/翻译，本次未开始（说完再按一次 K4 即可）。", UiTheme.Warn);
+                return;
+            }
+
+            // 先掐掉正在朗读的上一句：否则麦克风会把 TTS 的声音录进去。
+            if (_tts != null)
+                _tts.Stop();
+
+            _pttRecording = true;
+            _pttFromBle = true;    // BLE 直连触发：dongle 断链兜底不误伤本段
+            LogLine("自动录音：K4 → 启用蓝牙语音（mSBC 流入翻译管线，松开自动结束）。", UiTheme.Success);
+            bool ok = await TryStartBleVoiceAsync();
+
+            // 极短按竞态：松开沿在 CCCD 订阅完成前到达（OnBleK4Released 兜底已落 _pttRecording），
+            // 语音刚启起来就没人收尾了 → 立即按“松开”处理（送模型 + 统一收尾）。
+            if (ok && !_pttRecording && _bleVoiceActive)
+                OnBleVoiceOff(this, EventArgs.Empty);
+            UpdatePttUi();
+        }
+
+        /// <summary>K4 松开（直连）：自动【停用语音】→ OnStop 统一收尾（录音模式整段送模型）。</summary>
+        private void OnBleK4Released()
+        {
+            if (!_pttRecording)
+                return;
+
+            if (_bleVoiceActive)
+            {
+                LogLine("自动录音：K4 松开 → 停用蓝牙语音并翻译。", UiTheme.Success);
+                OnBleVoiceOff(this, EventArgs.Empty);   // → OnStop：CCCD 退订 + 统一收尾（内部会落 _pttRecording）
             }
             else
             {
-                LogLine("⚠ 自动录音不可用：Raw Input 注册失败（" + _ptt.LastError + "）。"
-                      + "仍可用【开始录音】按钮手动录音。", UiTheme.Warn);
+                // 启用失败的兜底（OnStop 没走到）：只落标志，不碰采集状态
+                _pttRecording = false;
+                UpdatePttUi();
             }
-            UpdatePttUi();
         }
 
         private void OnPttToggleChanged()
         {
-            if (_ptt != null)
-                _ptt.Enabled = _chkPtt != null && _chkPtt.Checked;
-
             // 取消勾选时如果正由语音键录音，先把这一段收尾（停止 → 翻译），
-            // 否则监听被禁用后 Enter 收不到，只能等 300s 上限。
+            // 否则 K4 松开边沿会被 HandlePttPressed 入口拦下，只能等 300s 上限。
+            // （Dongle 通道本身不停：重新勾上立即可用，与其它页面的模态互斥不受影响。）
             if (_chkPtt != null && !_chkPtt.Checked && _pttRecording)
                 HandlePttReleased();
 
             UpdatePttUi();
         }
 
-        /// <summary>Raw Input 事件在 UI 线程的 WndProc 里触发；延后一拍执行，避免在消息处理中重入采集。</summary>
+        /// <summary>SPP 帧事件在 UI 线程的 Pump 定时器里触发；延后一拍执行，避免在回调中重入采集。</summary>
         private void OnPttPressed()
         {
             if (IsDisposed)
@@ -1834,7 +2010,7 @@ namespace BibooUxTool
             catch { /* 窗口关闭竞态 */ }
         }
 
-        /// <summary>Ctrl+Win：自动开始一段录音（等同于点【开始录音】）。</summary>
+        /// <summary>K4 按下：自动开始一段录音（等同于点【开始录音】）。</summary>
         private void HandlePttPressed()
         {
             if (IsDisposed || _chkPtt == null || !_chkPtt.Checked)
@@ -1843,17 +2019,17 @@ namespace BibooUxTool
             if (_bleVoiceActive)
             {
                 // 蓝牙语音正在采集（实时字幕/翻译已在跑）：语音键自动录音无须再插一层
-                LogLine("自动录音：蓝牙语音采集中，本次 Ctrl+Win 忽略（说完的话已在进字幕）。", UiTheme.Warn);
+                LogLine("自动录音：蓝牙语音采集中，本次 K4 忽略（说完的话已在进字幕）。", UiTheme.Warn);
                 return;
             }
             if (_running)
             {
-                LogLine("自动录音：已在录音中，忽略本次 Ctrl+Win。", UiTheme.Warn);
+                LogLine("自动录音：已在录音中，忽略本次 K4。", UiTheme.Warn);
                 return;
             }
             if (_busy)
             {
-                LogLine("自动录音：上一段还在识别/翻译，本次未开始（说完再按一次 K5 即可）。", UiTheme.Warn);
+                LogLine("自动录音：上一段还在识别/翻译，本次未开始（说完再按一次 K4 即可）。", UiTheme.Warn);
                 return;
             }
 
@@ -1869,16 +2045,21 @@ namespace BibooUxTool
                 _tts.Stop();
 
             _pttRecording = true;
+            _pttFromBle = false;   // dongle 触发：断链兜底生效
             OnStart(this, EventArgs.Empty);
 
-            string device = _ptt != null && !string.IsNullOrEmpty(_ptt.LastDeviceName)
-                ? " · " + ShortDevicePath(_ptt.LastDeviceName)
-                : string.Empty;
-            LogLine("自动录音：Win+Ctrl → 开始（" + dev.Name + device + "）", UiTheme.Success);
+            string device = string.Empty;
+            if (_pttLink != null && _pttLink.IsConnected)
+            {
+                string p = _pttLink.GetOpenedPath();
+                if (!string.IsNullOrEmpty(p))
+                    device = " · " + ShortDevicePath(p);
+            }
+            LogLine("自动录音：K4 → 开始（" + dev.Name + device + "）", UiTheme.Success);
             UpdatePttUi();
         }
 
-        /// <summary>修饰符释放后的 Enter：自动停止 → 整段识别翻译 → 朗读译文（沿用现有链路）。</summary>
+        /// <summary>K4 松开：自动停止 → 整段识别翻译 → 朗读译文（沿用现有链路）。</summary>
         private void HandlePttReleased()
         {
             if (!_pttRecording)
@@ -1887,7 +2068,7 @@ namespace BibooUxTool
 
             if (_running)
             {
-                LogLine("自动录音：Enter → 停止并翻译。", UiTheme.Success);
+                LogLine("自动录音：K4 松开 → 停止并翻译。", UiTheme.Success);
                 OnStop(this, EventArgs.Empty);
             }
             UpdatePttUi();
@@ -1967,21 +2148,10 @@ namespace BibooUxTool
                 _lblPtt.ForeColor = UiTheme.TextSub;
                 return;
             }
-            if (_ptt == null)
-            {
-                _lblPtt.Text = "○ 正在启动鼠标监听…";
-                _lblPtt.ForeColor = UiTheme.TextSub;
-                return;
-            }
-            if (!_ptt.IsRegistered)
-            {
-                _lblPtt.Text = "⚠ 鼠标监听不可用（仍可按钮录音）";
-                _lblPtt.ForeColor = UiTheme.Warn;
-                return;
-            }
             if (_running && _pttRecording)
             {
-                _lblPtt.Text = "● 语音键录音中：松开 K5 自动结束并翻译";
+                _lblPtt.Text = "● 语音键录音中：松开 K4 自动结束并翻译"
+                             + (_pttFromBle ? "（蓝牙直连）" : "（Dongle）");
                 _lblPtt.ForeColor = UiTheme.Success;
                 return;
             }
@@ -1991,7 +2161,22 @@ namespace BibooUxTool
                 _lblPtt.ForeColor = UiTheme.Warn;
                 return;
             }
-            _lblPtt.Text = "◐ 已就绪：Win+Ctrl 开始 · Enter 结束（BLE 鼠标）";
+
+            // 就绪态按可用通道显示：BLE 直连（含语音特征）优先，其次 dongle（USB 录音链路），
+            // 都没连上时等待重连（两通道后台都在尝试，任一可用即切换到对应场景）。
+            if (_ble.IsLinkVerified && _ble.HasVoiceChar)
+            {
+                _lblPtt.Text = "◐ 已就绪：按住 K4 说话 · 松开结束（蓝牙直连，自动用蓝牙语音）";
+                _lblPtt.ForeColor = UiTheme.TextSub;
+                return;
+            }
+            if (_pttLink != null && _pttLink.IsConnected)
+            {
+                _lblPtt.Text = "◐ 已就绪：按住 K4 说话 · 松开结束（经 Dongle，自动用 Dongle 声卡）";
+                _lblPtt.ForeColor = UiTheme.TextSub;
+                return;
+            }
+            _lblPtt.Text = "○ 等待通道：蓝牙直连或 Dongle 任一连上即可用（后台自动重连）";
             _lblPtt.ForeColor = UiTheme.TextSub;
         }
 
@@ -2325,7 +2510,7 @@ namespace BibooUxTool
             // 句柄就绪后再启「已配对设备」枚举（AEP watcher 在线程池线程回调，必须能 BeginInvoke 到 UI）
             if (_blePairedMode)
                 _ble.StartPairedWatch();
-            InitPttWatcher();      // 先挂监听：用户进页面后随时可以按 K5
+            InitPttLink();       // 先挂 Dongle 通道：用户进页面后随时可以按 K4
             StartWarmup();
             // TTS 也一进页面就后台加载（2.8s）：等用户勾「朗读译文」再录完一句，
             // 模型早就绪了——否则首句要现场付 2.8s 加载 + 争 CPU，首音拖到 8s+。
