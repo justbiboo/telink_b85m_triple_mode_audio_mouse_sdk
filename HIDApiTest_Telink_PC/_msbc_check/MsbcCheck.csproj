@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>MsbcCheck</AssemblyName>
+    <RootNamespace>MsbcCheck</RootNamespace>
+    <DebugType>none</DebugType>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 链接主工程源码，避免重复维护 -->
+    <Compile Include="../BibooUxTool/BibooUxTool/MsbcDecoder.cs" />
+  </ItemGroup>
+
+</Project>

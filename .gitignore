@@ -84,6 +84,10 @@ HIDApiTest_Telink_PC/FactoryTestServer/data/*.csv
 # 临时试验工程构建输出
 HIDApiTest_Telink_PC/SppTestDemo/obj/
 HIDApiTest_Telink_PC/SppTestDemo/bin/
+HIDApiTest_Telink_PC/_msbc_check/obj/
+HIDApiTest_Telink_PC/_msbc_check/bin/
+HIDApiTest_Telink_PC/_probe/obj/
+HIDApiTest_Telink_PC/_probe/bin/
 
 # 本地工作记录（agent 记忆，不入库）
 .workbuddy/
