@@ -75,6 +75,16 @@ namespace BibooUxTool
         /// </summary>
         private GattCharacteristic _devInfoChar;
 
+        /// <summary>
+        /// 语音流 notify 特征（my_Data 0xB03E @ service 0xFFF0，vendor/user/voice_dec/ux_voice_dec.c）：
+        /// 鼠标把 16kHz/mono PCM 编成 57B mSBC 帧（7.5ms/帧，120 样本）经它 notify 给 PC
+        /// （MTU exchange 到 0x009e=158 后单帧一个 notify）。「实时翻译」页的蓝牙语音输入走这里，
+        /// 与 SPP 0x33F3/0x33F4、OTA 特征都无关。CCCD = value handle + 1（ux_voice_dec 显式注册）。
+        /// 订阅由 <see cref="StartVoiceAsync"/> 显式控制（与 USB 采集二选一，不自动开流）。
+        /// </summary>
+        private GattCharacteristic _voiceChar;
+        private volatile bool _voiceStreaming;
+
         /// <summary>连续活性校验失败次数，达到 VerifyFailLimit 即判定链路已断。</summary>
         private volatile int _verifyFailStreak;
 
@@ -152,8 +162,38 @@ namespace BibooUxTool
             }
         }
 
+        /// <summary>
+        /// 「链路就绪（不绑定具体特征）」判据：链路在 + ATT 活性读未累计失败。
+        /// 与 <see cref="IsConnected"/> 的区别：**不要求** SPP 0x33F3/0x33F4；
+        /// 与 <see cref="IsOtaReady"/> 的区别：**不要求** OTA 写特征。
+        /// 用于「实时翻译」页的蓝牙输入：后续语音流走 0xFFF0/0xB03E（与 SPP/OTA 都无关），
+        /// 连接与否只应看链路活性，不应被某个特征的缺失误判成「未连接」。
+        /// </summary>
+        public bool IsLinkVerified
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return !_userReleased &&
+                           _device != null &&
+                           _device.ConnectionStatus == BluetoothConnectionStatus.Connected &&
+                           _verifyFailStreak < VerifyFailLimit;
+                }
+            }
+        }
+
         /// <summary>链路被判定的断开原因（供 UI 说明「为什么掉了」）。</summary>
         public string LastDropReason { get; private set; }
+
+        /// <summary>是否已发现语音流特征（0xFFF0/0xB03E）。发现即具备启用条件，不等于在收流。</summary>
+        public bool HasVoiceChar
+        {
+            get { lock (_sync) { return _voiceChar != null; } }
+        }
+
+        /// <summary>语音 notify（CCCD）当前是否处于订阅态（<see cref="StartVoiceAsync"/> 成功后才为 true）。</summary>
+        public bool IsVoiceStreaming { get { return _voiceStreaming; } }
 
         /// <summary>最近一次连接后的链路活性校验结果：null = 通过；否则为失败原因。</summary>
         public string LastVerifyNote { get; private set; }
@@ -183,6 +223,17 @@ namespace BibooUxTool
 
         /// <summary>SPP notify(0x33F4) 收到的帧（≤20B）。</summary>
         public event Action<byte[]> SppReceived;
+
+        /// <summary>
+        /// 语音流 notify(0xFFF0/0xB03E) 收到的 mSBC 帧（57B/帧 → 120 样本 @16kHz/mono）。
+        /// 订阅由 <see cref="StartVoiceAsync"/> 控制；未订阅时不会触发。
+        /// 注意：每个 notify 即一整帧（MTU 158 下单帧 57B 不分片）；长度≠57 的 notify
+        /// 视为链路/MTU 异常，调用方应丢弃重新对齐。
+        /// </summary>
+        public event Action<byte[]> VoiceReceived;
+
+        /// <summary>语音特征/订阅的最近一次说明（未发现特征/订阅失败原因）；null = 正常。</summary>
+        public string LastVoiceNote { get; private set; }
 
         /// <summary>连接状态变化（true=连上 / false=断开）。</summary>
         public event Action<bool> ConnectionChanged;
@@ -804,6 +855,14 @@ namespace BibooUxTool
                 }
             }
 
+            // ⑤b 语音流特征（0xFFF0/0xB03E）就绪性记录：**不自动订阅** ——
+            //     与 USB 音频采集二选一，由调用方在用户启用蓝牙语音时显式 StartVoiceAsync()，
+            //     否则鼠标会一直往 PC 推 57B/7.5ms 的 mSBC（白占空口与电量）。
+            //     没有该特征不阻断连接（IsLinkVerified 不依赖它），只作说明。
+            LastVoiceNote = _voiceChar != null
+                ? null
+                : "未发现语音流特征(0xFFF0/0xB03E)：该设备/固件不支持 BLE 语音输入";
+
             // ⑥ 真连接判据（决定性）：ATT 级真实读取。
             //    链路对象存在 / ConnectionStatus=Connected 都不足以证明链路活着
             //    （WinRT 会维持幽灵状态），而一次 Uncached 的 ATT Read 是真实空口往返，
@@ -926,18 +985,21 @@ namespace BibooUxTool
         /// <summary>释放当前设备对象、GattSession 与特征缓存（不触发 ConnectionChanged）。可重入。</summary>
         private void ReleaseDevice()
         {
-            GattCharacteristic nc;
+            GattCharacteristic nc, vc;
             BluetoothLEDevice dev;
             GattSession session;
             lock (_sync)
             {
                 nc = _notifyChar;
+                vc = _voiceChar;
                 dev = _device;
                 session = _session;
                 _device = null;
                 _session = null;
                 _writeChar = null;
                 _notifyChar = null;
+                _voiceChar = null;
+                _voiceStreaming = false;
                 _probeChar = null;
                 _probeName = null;
                 _devInfoChar = null;
@@ -950,6 +1012,10 @@ namespace BibooUxTool
             if (nc != null)
             {
                 try { nc.ValueChanged -= OnValueChanged; } catch { }
+            }
+            if (vc != null)
+            {
+                try { vc.ValueChanged -= OnVoiceValueChanged; } catch { }
             }
             if (session != null)
             {
@@ -1041,9 +1107,11 @@ namespace BibooUxTool
                 _probeChar = null;
                 _probeName = null;
                 _devInfoChar = null;
+                _voiceChar = null;
                 _gattCustomUuids.Clear();
                 _gattServiceUuids.Clear();
             }
+            _voiceStreaming = false;
 
             BluetoothCacheMode primary = sysConnected
                 ? BluetoothCacheMode.Cached : BluetoothCacheMode.Uncached;
@@ -1116,6 +1184,11 @@ namespace BibooUxTool
                     if (c.Uuid == BleUxProto.DevInfoUuid || c.Uuid == BleUxProto.DevInfoUuidRaw)
                         _devInfoChar = c;
 
+                    // 语音流 notify（my_Data 0xB03E @ service 0xFFF0，ux_voice_dec.c）：
+                    // 翻译页蓝牙语音输入。与 SPP/OTA 独立发现，订阅延后到用户点【启用语音】。
+                    if (c.Uuid == BleUxProto.VoiceCharUuid)
+                        _voiceChar = c;
+
                     // 诊断用：记下自定义 128-bit UUID（标准 base UUID 结尾的 16-bit 特征不算）
                     string ustr = c.Uuid.ToString();
                     if (!ustr.EndsWith("-0000-1000-8000-00805f9b34fb", StringComparison.OrdinalIgnoreCase) &&
@@ -1124,7 +1197,9 @@ namespace BibooUxTool
                         _gattCustomUuids.Add(ustr);
                     }
                 }
-                if (_writeChar != null && _notifyChar != null && _otaChar != null)
+                // 语音特征也找齐才提前收工；设备没有语音服务时自然遍历完全部服务
+                // （OTA 页本来就常需全量枚举，多几个服务的代价可接受）。
+                if (_writeChar != null && _notifyChar != null && _otaChar != null && _voiceChar != null)
                     break;
             }
 
@@ -1505,6 +1580,82 @@ namespace BibooUxTool
             SppReceived?.Invoke(buf);
         }
 
+        /// <summary>
+        /// 语音流 notify（0xB03E）：每帧 57B mSBC。与 SPP 的 ping 回包机制完全无关，
+        /// 直接分发 <see cref="VoiceReceived"/>（未订阅时不触发）。
+        /// </summary>
+        private void OnVoiceValueChanged(GattCharacteristic sender, GattValueChangedEventArgs args)
+        {
+            var dr = DataReader.FromBuffer(args.CharacteristicValue);
+            byte[] buf = new byte[dr.UnconsumedBufferLength];
+            dr.ReadBytes(buf);
+            VoiceReceived?.Invoke(buf);
+        }
+
+        /// <summary>
+        /// 订阅语音流 notify（写 0xB03E 的 CCCD）。「实时翻译」页在用户点【启用语音】时调用
+        /// （与 USB 音频采集二选一）。返回 null = 成功；否则为失败原因。
+        /// 幂等：已订阅时重复调用只是重写一次 CCCD（先摘后挂，防事件重复订阅）。
+        /// </summary>
+        public async Task<string> StartVoiceAsync()
+        {
+            GattCharacteristic vc;
+            lock (_sync) { vc = _voiceChar; }
+            if (vc == null)
+                return "未发现语音流特征(0xFFF0/0xB03E)：该设备不支持 BLE 语音输入";
+
+            try
+            {
+                vc.ValueChanged -= OnVoiceValueChanged;   // 先摘后挂：防重复订阅
+                vc.ValueChanged += OnVoiceValueChanged;
+                GattCommunicationStatus st =
+                    await vc.WriteClientCharacteristicConfigurationDescriptorAsync(
+                        GattClientCharacteristicConfigurationDescriptorValue.Notify);
+                if (st != GattCommunicationStatus.Success)
+                {
+                    try { vc.ValueChanged -= OnVoiceValueChanged; } catch { }
+                    _voiceStreaming = false;
+                    return "订阅语音 notify(0xB03E) 失败：" + st;
+                }
+                _voiceStreaming = true;
+                LastVoiceNote = null;
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _voiceStreaming = false;
+                return "订阅语音 notify 异常：" + ex.Message;
+            }
+        }
+
+        /// <summary>
+        /// 退订语音 notify（鼠标停止向 PC 推 mSBC，省空口与鼠标电量）。幂等；
+        /// 未订阅/无特征时直接返回 null。断开流程（<see cref="CloseNotifyAsync"/>）也会调用。
+        /// </summary>
+        public async Task<string> StopVoiceAsync()
+        {
+            GattCharacteristic vc;
+            lock (_sync) { vc = _voiceChar; }
+            _voiceStreaming = false;
+            if (vc == null)
+                return null;
+
+            try { vc.ValueChanged -= OnVoiceValueChanged; } catch { }
+            try
+            {
+                GattCommunicationStatus st =
+                    await vc.WriteClientCharacteristicConfigurationDescriptorAsync(
+                        GattClientCharacteristicConfigurationDescriptorValue.None);
+                return st == GattCommunicationStatus.Success
+                    ? null
+                    : "关闭语音 notify 未成功（" + st + "）";
+            }
+            catch (Exception ex)
+            {
+                return "关闭语音 notify 异常：" + ex.Message;
+            }
+        }
+
         private void OnConnStatusChanged(BluetoothLEDevice sender, object args)
         {
             if (sender.ConnectionStatus == BluetoothConnectionStatus.Connected)
@@ -1526,7 +1677,8 @@ namespace BibooUxTool
                 return;
             }
 
-            lock (_sync) { _writeChar = null; _notifyChar = null; }
+            lock (_sync) { _writeChar = null; _notifyChar = null; _voiceChar = null; }
+            _voiceStreaming = false;
             _verifyFailStreak = VerifyFailLimit;
             LastDropReason = "系统上报 GATT 链路断开（ConnectionStatus=Disconnected）";
             ConnectionChanged?.Invoke(false);
@@ -1547,7 +1699,8 @@ namespace BibooUxTool
                 return;
             }
 
-            lock (_sync) { _writeChar = null; _notifyChar = null; }
+            lock (_sync) { _writeChar = null; _notifyChar = null; _voiceChar = null; }
+            _voiceStreaming = false;
             _verifyFailStreak = VerifyFailLimit;
             LastDropReason = "GattSession 失效（链路被系统/对端释放）";
             ConnectionChanged?.Invoke(false);
@@ -1959,29 +2112,46 @@ namespace BibooUxTool
         }
 
         /// <summary>
-        /// 关闭 0x33F4 的 CCCD 通知（礼貌告知对端「PC 不再收 notify」）。
+        /// 关闭 SPP(0x33F4) 与语音(0xB03E) 的 CCCD 通知（礼貌告知对端「PC 不再收 notify」）。
         /// 只解绑事件而不关 CCCD，对端会继续往一个已无人接收的链路上发通知。
         /// </summary>
         private async Task<string> CloseNotifyAsync()
         {
-            GattCharacteristic nc;
-            lock (_sync) { nc = _notifyChar; }
-            if (nc == null)
-                return "";
+            GattCharacteristic nc, vc;
+            lock (_sync) { nc = _notifyChar; vc = _voiceChar; }
+            string note = "";
 
-            try { nc.ValueChanged -= OnValueChanged; } catch { }
-            try
+            if (nc != null)
             {
-                var st = await nc.WriteClientCharacteristicConfigurationDescriptorAsync(
-                    GattClientCharacteristicConfigurationDescriptorValue.None);
-                if (st == GattCommunicationStatus.Success)
-                    return "已关闭 notify 通知（0x33F4 CCCD）。";
-                return "关闭 notify 未成功（" + st + "）。";
+                try { nc.ValueChanged -= OnValueChanged; } catch { }
+                try
+                {
+                    var st = await nc.WriteClientCharacteristicConfigurationDescriptorAsync(
+                        GattClientCharacteristicConfigurationDescriptorValue.None);
+                    note = st == GattCommunicationStatus.Success
+                        ? "已关闭 notify 通知（0x33F4 CCCD）。"
+                        : "关闭 notify 未成功（" + st + "）。";
+                }
+                catch (Exception ex)
+                {
+                    note = "关闭 notify 异常（" + ex.Message + "）。";
+                }
             }
-            catch (Exception ex)
+
+            // 语音 CCCD：断开时一并关掉（用户停用路径也会调 StopVoiceAsync，这里兜底）
+            _voiceStreaming = false;
+            if (vc != null)
             {
-                return "关闭 notify 异常（" + ex.Message + "）。";
+                try { vc.ValueChanged -= OnVoiceValueChanged; } catch { }
+                try
+                {
+                    await vc.WriteClientCharacteristicConfigurationDescriptorAsync(
+                        GattClientCharacteristicConfigurationDescriptorValue.None);
+                }
+                catch { /* 断开竞态：链路可能已不在，忽略 */ }
             }
+
+            return note;
         }
 
         public void Dispose()

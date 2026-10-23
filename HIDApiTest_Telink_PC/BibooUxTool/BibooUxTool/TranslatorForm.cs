@@ -17,7 +17,9 @@ namespace BibooUxTool
     ///   ② 实时字幕（勾选框）：USB Audio 采集 → VAD 分段 → 逐段送引擎，边说边出字幕。
     /// 当前引擎为桩实现（不加载模型），先把「采集→分段→识别→翻译→字幕」链路与 UI 搭好；
     /// 后续接 Whisper.net（ASR）+ Argos/OPUS-MT（MT）时只换 ITranslationEngine 实现，UI 不动。
-    /// 音频源暂用 USB Audio（鼠标当 USB 声卡 / 普通麦克风均走标准 WaveIn），不走 BLE。
+    /// 音频源二选一：USB Audio（鼠标当 USB 声卡 / 普通麦克风均走标准 WaveIn），
+    /// 或「蓝牙输入（BLE 直连）」—— 经语音流特征 0xFFF0/0xB03E 收 57B mSBC 帧，
+    /// MsbcDecoder 解成 240B PCM 后喂同一 VAD/识别/翻译管线（与 SDK ux_voice_dec 同口径）。
     /// </summary>
     public sealed class TranslatorForm : Form
     {
@@ -91,6 +93,36 @@ namespace BibooUxTool
         private double _lastRecUiSec;      // 仅音频回调线程使用：录音时长 UI 刷新节流
         private const int MaxRecordSeconds = 300;   // 单次录音上限，防内存无限增长
         private const double MinRecordSeconds = 0.2; // 短于此视为误触，不送模型
+
+        // ---------- 蓝牙输入（BLE 直连 · 配对连接）----------
+        // 第一步只做「配对/连接」：交互与判据完全对齐「固件升级」页 OtaForm 的 BLE Direct 子面板
+        // 与「蓝牙连接」页 BleScannerForm —— 已配对设备列表 → 选中【连接】/双击回连 →
+        // GattSession 维持 + 2.5s ATT 活性巡检揪假连接 → 断开/系统配对/扫描附近旁路。
+        // 第二步（已落地）：连上后经语音流特征 0xFFF0/0xB03E 收 57B mSBC 帧 → MsbcDecoder 解成
+        // 240B PCM（120 样本 @16kHz/mono）→ 直接喂 OnAudioData 进现有 VAD/识别/翻译管线。
+        // 音源二选一（用户 2026-10-22 确认）：蓝牙语音启用时停 USB Audio 采集，反之亦然。
+        private readonly BleDirectLink _ble = new BleDirectLink();
+        private readonly MsbcDecoder _msbc = new MsbcDecoder();  // 57B mSBC → 240B PCM；会话内状态跨帧保持
+        private volatile bool _bleVoiceActive;   // 蓝牙语音是否为当前音源（二选一）
+        private int _bleVoiceFrames;             // 已入管 PCM 帧数（状态行/日志统计）
+        private int _bleVoiceErr;                // 解码失败/帧长异常计数（限流日志）
+        private ListBox _lstBle;
+        private Label _lblBleState;
+        private GradientButton _btnBleModePaired;
+        private GradientButton _btnBleModeScan;
+        private GradientButton _btnBleRefresh;
+        private GradientButton _btnBleSysPair;
+        private GradientButton _btnBleConnect;
+        private GradientButton _btnBleDisconnect;
+        private GradientButton _btnBleVoiceOn;   // 启用蓝牙语音（订阅 0xB03E notify）
+        private GradientButton _btnBleVoiceOff;  // 停用蓝牙语音（退订，USB 音频随即可用）
+        private readonly Dictionary<string, BleDeviceInfo> _blePairedItems = new Dictionary<string, BleDeviceInfo>();
+        private readonly Dictionary<ulong, BleDeviceInfo> _bleFound = new Dictionary<ulong, BleDeviceInfo>();
+        private bool _blePairedMode = true;      // true = 系统已配对设备（默认，免扫描）；false = 扫描附近
+        private bool _uiBleConnected;            // UI 口径的连接态（只由 ATT 活性校验给出）
+        private bool _bleBusyConnect;            // 连接进行中（防重入）
+        private int _bleVerifyBusy;              // 活性巡检重入保护
+        private System.Windows.Forms.Timer _bleLinkTimer;   // 2.5s 一次 ATT 活性读，揪出假连接
 
         /// <summary>语言选项：中文名（Name，列表主行）+ 母语名（Native，列表副行）+ 引擎用 Code（BCP-47 风格）。
         /// 面板可搜索（中文名 / 母语名 / Code 均可命中），双语名对照显示。</summary>
@@ -182,6 +214,7 @@ namespace BibooUxTool
 
         // 四张卡片的直接引用：LayoutContent 需要按顺序做纵向重排（字幕区/日志区吸收多余高度）
         private RoundedPanel _cardAudio;
+        private RoundedPanel _cardBle;
         private RoundedPanel _cardEngine;
         private RoundedPanel _cardSub;
         private RoundedPanel _cardLog;
@@ -190,6 +223,10 @@ namespace BibooUxTool
         private const int CardMargin = 12;
         private const int CardGap = 12;
         private const int AudioCardHeight = 204;   // 176（原「朗读译文」行）+ 28（鼠标语音键自动录音行）
+
+        /// <summary>蓝牙输入卡高度：标题(30) + 模式按钮行(34) + 状态行(18) + 设备列表(84) + 连接/断开
+        /// + 启用/停用语音两枚按钮 + 内边距（第二步加语音开关，180 → 212）。</summary>
+        private const int BleCardHeight = 212;
 
         /// <summary>暂时屏蔽引擎卡里的两行说明（用户红框圈出的「预热状态」+「引擎推荐说明」）。
         /// 改回 true 即两行恢复显示，引擎卡高度也会自动还原，无需再改别处。</summary>
@@ -222,6 +259,10 @@ namespace BibooUxTool
                   + "SenseVoice ASR / Whisper ASR / Whisper 直译→英语 / Whisper+Argos。", UiTheme.TextSub);
             LogLine("混元需 Models\\llm\\Hy-MT2-1.8B-Q4_K_M.gguf + llama\\llama-server.exe（首次翻译会自动拉起，全离线）；"
                   + "Whisper 需 Models\\ggml-base.bin；Argos MT 需本机起本地服务（见 TranslationConfig）。", UiTheme.TextSub);
+            LogLine("新增「蓝牙输入（BLE 直连 · 配对连接）」卡：已配对设备 →【连接】/双击回连，"
+                  + "或【扫描附近】直连未配对设备；未配对先用【系统配对】。"
+                  + "连上后点【启用语音】即把鼠标 mSBC 语音流（57B/帧）解成 PCM 送入本管线，"
+                  + "与 USB 音频采集二选一。", UiTheme.TextSub);
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -234,9 +275,620 @@ namespace BibooUxTool
             _capture.Dispose();
             if (_tts != null) { _tts.Stop(); _tts.Dispose(); _tts = null; }
             if (_ptt != null) { _ptt.Dispose(); _ptt = null; }
+            // 蓝牙输入：停巡检 → 摘语音事件 → 关 notify（含 0xB03E CCCD）+ 释放 PC 侧对象 → Dispose
+            try { if (_bleLinkTimer != null) _bleLinkTimer.Stop(); } catch (Exception) { }
+            try { _ble.VoiceReceived -= OnBleVoiceFrame; } catch (Exception) { }
+            _bleVoiceActive = false;
+            _running = false;
+            try { _ble.Disconnect(); } catch (Exception) { }
+            try { _ble.Dispose(); } catch (Exception) { }
             // 关窗口时收掉我们自己拉起的 llama-server（只杀本进程启动的那个，用户手起的不动）
             LlmServerLauncher.Stop();
             base.OnFormClosed(e);
+        }
+
+        // ---------- 蓝牙输入：BLE 直连配对/连接（交互与判据对齐「固件升级」页 BLE Direct 面板）----------
+
+        /// <summary>模式切换后刷新控件可用态与列表（不负责启停 watcher）。</summary>
+        private void ApplyBleMode()
+        {
+            if (_btnBleModePaired == null)
+                return;
+            _btnBleModePaired.IsPrimary = _blePairedMode;
+            _btnBleModeScan.IsPrimary = !_blePairedMode;
+            _btnBleRefresh.Enabled = _blePairedMode;
+            _lstBle.Items.Clear();
+            _bleFound.Clear();
+            _blePairedItems.Clear();
+            UpdateBleConnUi(_uiBleConnected);
+        }
+
+        private void OnBleModePaired(object sender, EventArgs e)
+        {
+            if (_blePairedMode)
+                return;
+            _blePairedMode = true;
+            ApplyBleMode();
+            _ble.StartPairedWatch();
+            LogLine("已切到「已配对设备」：取系统已配对 BLE 设备中当前已连接的（免扫描），"
+                  + "选中后点【连接】或双击条目即可回连。", UiTheme.TextSub);
+        }
+
+        private void OnBleModeScan(object sender, EventArgs e)
+        {
+            if (_blePairedMode)
+            {
+                _blePairedMode = false;
+                _ble.StopPairedWatch();
+                ApplyBleMode();
+                LogLine("已切到「扫描附近」：10s 广播扫描，用于直连未配对设备"
+                      + "（不占鼠标 bonding 名额；随机地址会轮换，扫到后尽快连）。", UiTheme.TextSub);
+            }
+            StartBleScan();   // 再点一次 = 重新扫描
+        }
+
+        private void OnBleRefresh(object sender, EventArgs e)
+        {
+            if (!_blePairedMode)
+                return;
+            _lstBle.Items.Clear();
+            _blePairedItems.Clear();
+            _ble.RestartPairedWatch();
+            LogLine("正在刷新已配对设备列表…", UiTheme.TextSub);
+        }
+
+        /// <summary>
+        /// 【系统配对】：一键打开 Windows「蓝牙和设备」设置页（与 OTA /「蓝牙连接」页同一做法）。
+        /// 配对是一次性 bonding，系统 UI 有完整进度/确认，比应用内 PairAsync 稳；
+        /// 配好后已配对列表会自动多出该设备，选中【连接】即可。
+        /// </summary>
+        private void OnBleSysPair(object sender, EventArgs e)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("ms-settings:bluetooth") { UseShellExecute = true });
+                LogLine("已打开 Windows 蓝牙设置：在设备列表里点该鼠标 → 配对/连接；"
+                      + "成功后回本页【刷新】→【连接】。", UiTheme.TextSub);
+            }
+            catch (Exception ex)
+            {
+                LogLine("打开系统蓝牙设置失败（" + ex.GetType().Name + "）：" + ex.Message
+                      + "。可手动：设置 → 蓝牙和设备 → 添加设备。", UiTheme.Danger);
+            }
+        }
+
+        private void StartBleScan()
+        {
+            _lstBle.Items.Clear();
+            _bleFound.Clear();
+            _ble.StopScan();
+            LogLine("扫描中（10s，隐藏无名称设备）…", UiTheme.TextSub);
+            _ble.StartScan(null, 10000, true);
+        }
+
+        private void OnBleDiscovered(BleDeviceInfo dev)
+        {
+            if (IsDisposed || !IsHandleCreated || dev == null)
+                return;
+            try { BeginInvoke(new Action(() => UpsertScannedBleDevice(dev))); }
+            catch (Exception) { }
+        }
+
+        /// <summary>扫描条目按 MAC 去重（已存在就刷新名称/RSSI，不重复建行）。</summary>
+        private void UpsertScannedBleDevice(BleDeviceInfo dev)
+        {
+            // 已配对模式下，扫描结果只用来补「固件版本」：AEP 列表没有广播数据，
+            // 而版本号只存在于广播 Manufacturer Data（固件 AAA_app.c）。
+            if (_blePairedMode)
+            {
+                AttachFwVersionToPaired(dev);
+                return;
+            }
+            BleDeviceInfo old;
+            if (_bleFound.TryGetValue(dev.BluetoothAddress, out old))
+            {
+                old.Name = dev.Name ?? old.Name;
+                old.Rssi = dev.Rssi;
+                old.LastSeen = dev.LastSeen;
+                old.AddressType = dev.AddressType;
+                if (!string.IsNullOrEmpty(dev.FwVersion))
+                    old.FwVersion = dev.FwVersion;
+                int idx = _lstBle.Items.IndexOf(old);
+                if (idx >= 0)
+                {
+                    _lstBle.Items.RemoveAt(idx);
+                    _lstBle.Items.Insert(idx, old);
+                }
+            }
+            else
+            {
+                _bleFound[dev.BluetoothAddress] = dev;
+                _lstBle.Items.Add(dev);
+            }
+        }
+
+        /// <summary>已配对模式下：把扫描到的固件版本补到同 MAC 的已配对行上。
+        /// 版本号只在广播 Manufacturer Data 里，AEP 列表拿不到，故连接前跑一次短扫描。</summary>
+        private void AttachFwVersionToPaired(BleDeviceInfo dev)
+        {
+            if (string.IsNullOrEmpty(dev.FwVersion))
+                return;
+            foreach (var kv in _blePairedItems)
+            {
+                if (kv.Value.BluetoothAddress != dev.BluetoothAddress || kv.Value.AddressKnown == false)
+                    continue;
+                if (kv.Value.FwVersion == dev.FwVersion)
+                    return;
+                kv.Value.FwVersion = dev.FwVersion;
+                int idx = _lstBle.Items.IndexOf(kv.Value);
+                if (idx >= 0)
+                {
+                    int sel = _lstBle.SelectedIndex;      // 刷新行不能把用户的选中打掉
+                    _lstBle.Items.RemoveAt(idx);
+                    _lstBle.Items.Insert(idx, kv.Value);
+                    _lstBle.SelectedIndex = sel;
+                }
+                return;
+            }
+        }
+
+        private void OnBleScanCompleted(int rawCount, int matchedCount, int unnamedCount, string reason)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (_blePairedMode)
+                    {
+                        // 已配对模式下的短扫描只为补版本号，不列设备
+                        LogLine(string.Format("版本读取扫描结束（{0}）：收到广播 {1} 条。", reason, rawCount),
+                            UiTheme.TextSub);
+                        return;
+                    }
+                    LogLine(string.Format("扫描结束（{0}）：收到广播 {1} 条，列出设备 {2} 个{3}。",
+                        reason, rawCount, matchedCount,
+                        unnamedCount > 0 ? "，隐藏无名称 " + unnamedCount + " 个" : ""), UiTheme.TextSub);
+                    if (rawCount == 0)
+                        LogLine("一条广播都没收到 → 查：①Windows 蓝牙是否打开；②鼠标是否在广播态"
+                              + "（已连 Dongle/其它主机时通常不广播）；③距离；④是否被其它主机占用。",
+                            UiTheme.Danger);
+                }));
+            }
+            catch (Exception) { }
+        }
+
+        private void OnBlePairedChanged(BleDeviceInfo info, BleDirectLink.PairedChangeKind kind)
+        {
+            if (IsDisposed || !IsHandleCreated || info == null)
+                return;
+            try { BeginInvoke(new Action(() => UpsertPairedBleItem(info, kind))); }
+            catch (Exception) { }
+        }
+
+        /// <summary>已配对列表增/改/删（按 DeviceId 去重；快照与 watcher 重复上报不会产生重复行）。</summary>
+        private void UpsertPairedBleItem(BleDeviceInfo info, BleDirectLink.PairedChangeKind kind)
+        {
+            if (IsDisposed)
+                return;
+            BleDeviceInfo old;
+            switch (kind)
+            {
+                case BleDirectLink.PairedChangeKind.Added:
+                case BleDirectLink.PairedChangeKind.Updated:
+                    // 「已配对」列表只保留系统已连接的设备：未连接的不建行；已在列表中的
+                    // 条目掉线（Updated 且 SystemConnected=false）时立即移出，保证所见即可连。
+                    if (!info.SystemConnected)
+                    {
+                        if (_blePairedItems.TryGetValue(info.DeviceId, out old))
+                        {
+                            _lstBle.Items.Remove(old);
+                            _blePairedItems.Remove(info.DeviceId);
+                        }
+                        break;
+                    }
+                    if (_blePairedItems.TryGetValue(info.DeviceId, out old))
+                    {
+                        int idx = _lstBle.Items.IndexOf(old);
+                        if (idx >= 0)
+                        {
+                            bool wasSel = ReferenceEquals(_lstBle.SelectedItem, old);
+                            _lstBle.Items.RemoveAt(idx);
+                            _lstBle.Items.Insert(idx, info);
+                            if (wasSel)
+                                _lstBle.SelectedItem = info;   // 重排会丢选中，恢复
+                        }
+                        _blePairedItems[info.DeviceId] = info;
+                    }
+                    else
+                    {
+                        _blePairedItems[info.DeviceId] = info;
+                        _lstBle.Items.Add(info);
+                    }
+                    break;
+                case BleDirectLink.PairedChangeKind.Removed:
+                    if (_blePairedItems.TryGetValue(info.DeviceId, out old))
+                    {
+                        _lstBle.Items.Remove(old);
+                        _blePairedItems.Remove(info.DeviceId);
+                    }
+                    break;
+            }
+            UpdateBleConnUi(_uiBleConnected);
+        }
+
+        private void OnBlePairedWatchState(string msg)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+            try { BeginInvoke(new Action(() => LogLine(msg, UiTheme.Warn))); }
+            catch (Exception) { }
+        }
+
+        private void MarkBleAttached(string deviceId)
+        {
+            if (!_blePairedMode)
+                return;
+            var sel = _lstBle.SelectedItem as BleDeviceInfo;
+            string selId = sel != null ? sel.DeviceId : null;
+            try
+            {
+                foreach (var kv in _blePairedItems)
+                {
+                    bool attached = !string.IsNullOrEmpty(deviceId) && kv.Key == deviceId;
+                    if (kv.Value.Attached == attached)
+                        continue;
+                    kv.Value.Attached = attached;
+                    int i = _lstBle.Items.IndexOf(kv.Value);
+                    if (i >= 0)
+                    {
+                        _lstBle.Items.RemoveAt(i);
+                        _lstBle.Items.Insert(i, kv.Value);
+                    }
+                }
+            }
+            finally
+            {
+                if (selId != null)
+                {
+                    BleDeviceInfo cur;
+                    if (_blePairedItems.TryGetValue(selId, out cur))
+                        _lstBle.SelectedItem = cur;
+                }
+            }
+        }
+
+        /// <summary>连接态 UI。只认 ATT 活性校验结果（BleDirectLink.IsLinkVerified），不给假连接。</summary>
+        private void UpdateBleConnUi(bool connected)
+        {
+            _uiBleConnected = connected;
+            if (_lblBleState == null)
+                return;
+
+            if (connected)
+            {
+                if (_bleVoiceActive)
+                    _lblBleState.Text = "● 已连接；蓝牙语音采集中（mSBC 57B → PCM 240B 已入翻译管线，"
+                                     + "与 USB 音频二选一）";
+                else if (_ble.HasVoiceChar)
+                    _lblBleState.Text = "● 已连接（ATT 活性校验通过）；语音通道就绪，点【启用语音】接入翻译管线";
+                else
+                    _lblBleState.Text = "● 已连接（ATT 活性校验通过）；未发现语音特征 0xFFF0/0xB03E"
+                                     + "（该固件不支持 BLE 语音输入，SPP/OTA 不受影响）";
+                _lblBleState.ForeColor = UiTheme.Success;
+            }
+            else
+            {
+                // 掉线/手动断开：蓝牙语音随链路一起收尾（不停 USB——它本来就没开）
+                if (_bleVoiceActive)
+                    StopBleVoiceSync("BLE 链路断开");
+
+                _lblBleState.Text = _blePairedMode
+                    ? "○ 未连接：选中已配对设备后点【连接】（或双击条目）；未配对先用【系统配对】"
+                    : "○ 未连接：点【扫描附近】开始扫描，选中后点【连接】";
+                _lblBleState.ForeColor = UiTheme.Danger;
+            }
+
+            _btnBleConnect.Enabled = !connected && _lstBle.SelectedItem != null;
+            _btnBleDisconnect.Enabled = connected;
+            _btnBleRefresh.Enabled = _blePairedMode;
+            _btnBleVoiceOn.Enabled = connected && !_bleVoiceActive && _ble.HasVoiceChar;
+            _btnBleVoiceOff.Enabled = _bleVoiceActive;
+            MarkBleAttached(connected ? _ble.ConnectedDeviceId : null);
+        }
+
+        private void OnBleListDoubleClick(object sender, EventArgs e)
+        {
+            if (_uiBleConnected || _lstBle.SelectedItem == null)
+                return;
+            OnBleConnect(sender, e);
+        }
+
+        private void OnBleConnChanged(bool up)
+        {
+            if (IsHandleCreated == false)
+                return;
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    UpdateBleConnUi(up);
+                    LogLine("BLE 连接状态：" + (up ? "已连接（往返校验通过）" : "已断开"),
+                        up ? UiTheme.Success : UiTheme.Warn);
+                }));
+            }
+            catch (Exception) { }
+        }
+
+        /// <summary>2.5s 链路巡检：ATT 活性读不过就判未连接（与「蓝牙连接」页同一铁律）。</summary>
+        private async void OnBleLinkTimer(object sender, EventArgs e)
+        {
+            if (IsDisposed || _bleVerifyBusy != 0)
+                return;
+            _bleVerifyBusy = 1;
+            try
+            {
+                if (_ble.IsLinkUp)
+                    await _ble.VerifyAsync(1200);
+
+                // 判据用 IsLinkVerified（只要求链路 + 活性读）：本页后续语音流走 0xFFF0/0xB03E，
+                // 与 SPP 0x33F3/0x33F4、OTA 特征都无关，不能因某个特征缺失每 2.5s 被判掉线。
+                bool up = _ble.IsLinkVerified;
+                if (up == _uiBleConnected)
+                    return;
+
+                UpdateBleConnUi(up);
+                LogLine(up
+                    ? "链路巡检：ATT 活性读通过 → 已连接。"
+                    : "链路巡检：ATT 活性读失败 → 判定未连接。"
+                      + (string.IsNullOrEmpty(_ble.LastDropReason) ? "" : "原因：" + _ble.LastDropReason),
+                    up ? UiTheme.Success : UiTheme.Danger);
+            }
+            catch (Exception ex)
+            {
+                LogLine("链路巡检异常（" + ex.GetType().Name + "）：" + ex.Message, UiTheme.Warn);
+            }
+            finally
+            {
+                _bleVerifyBusy = 0;
+            }
+        }
+
+        private async void OnBleConnect(object sender, EventArgs e)
+        {
+            var dev = _lstBle.SelectedItem as BleDeviceInfo;
+            if (dev == null)
+            {
+                LogLine("请先在列表中选择一个设备。", UiTheme.Danger);
+                return;
+            }
+            if (_bleBusyConnect)
+            {
+                LogLine("上一次连接还在进行中，请稍候…", UiTheme.Warn);
+                return;
+            }
+
+            _bleBusyConnect = true;
+            _btnBleConnect.Enabled = false;
+            try
+            {
+                LogLine(string.Format("正在连接 {0}（{1}）…", dev.Name ?? "(未命名设备)", dev.Mac), UiTheme.TextSub);
+                // 已配对条目走 AEP Id（不怕随机地址轮换）；扫描来的走地址 + 地址类型。
+                // 第三参 requireSpp=false：本页后续只收语音流特征，SPP 缺失不应判成连接失败
+                // （8208 量产固件实测存在枚举不到 SPP 服务的情况）。
+                string err = dev.IsPairedItem
+                    ? await _ble.ConnectByIdAsync(dev.DeviceId, 10000, false)
+                    : await _ble.ConnectAsync(dev.BluetoothAddress, dev.AddressType, false);
+                if (err != null)
+                {
+                    LogLine("连接失败：" + err, UiTheme.Danger);
+                    UpdateBleConnUi(false);
+                    return;
+                }
+                LogLine("已连上；链路活性校验：" + (_ble.LastLivenessNote ?? "真实空口读取成功"),
+                    UiTheme.Success);
+                if (string.IsNullOrEmpty(dev.FwVersion))
+                    LogLine("设备固件版本：未知（已配对设备已连系统后不再广播；"
+                        + "可切「扫描附近」看能否补到）", UiTheme.TextSub);
+                else
+                    LogLine("设备固件版本：" + dev.FwVersion, UiTheme.Success);
+                if (!string.IsNullOrEmpty(_ble.LastSppCmdNote))
+                    LogLine(_ble.LastSppCmdNote, UiTheme.TextSub);
+                // 读鼠标当前固件版本号（DevInf_aaa，GATT 只读，无需配对/加密/广播即可读）
+                if (_ble.HasDevInfoChar)
+                {
+                    BleDevInf di = await _ble.ReadDevInfoAsync(1200);
+                    if (di != null)
+                    {
+                        dev.FwVersion = di.FwText;
+                        LogLine("GATT 读回鼠标固件版本：" + di.FwText, UiTheme.Success);
+                    }
+                }
+                if (_ble.HasVoiceChar)
+                    LogLine("语音流特征就绪（0xFFF0/0xB03E notify，57B mSBC/帧）：点【启用语音】"
+                          + "即把蓝牙语音接入翻译管线（与 USB 音频二选一）。", UiTheme.Success);
+                else
+                    LogLine("未发现语音流特征（0xFFF0/0xB03E）：该设备/固件不支持 BLE 语音输入，"
+                          + "只能继续用 USB 音频采集（SPP/OTA 不受影响）。", UiTheme.Warn);
+                UpdateBleConnUi(true);
+            }
+            catch (Exception ex)
+            {
+                LogLine("连接异常（" + ex.GetType().Name + "）：" + ex.Message, UiTheme.Danger);
+                UpdateBleConnUi(false);
+            }
+            finally
+            {
+                _bleBusyConnect = false;
+                UpdateBleConnUi(_uiBleConnected);
+            }
+        }
+
+        private void OnBleDisconnect(object sender, EventArgs e)
+        {
+            _btnBleDisconnect.Enabled = false;
+            LogLine("正在断开…", UiTheme.TextSub);
+            _ = DisconnectBleAsync();
+        }
+
+        private async Task DisconnectBleAsync()
+        {
+            try
+            {
+                string note = await _ble.DisconnectAsync();
+                UpdateBleConnUi(false);
+                foreach (var line in note.Split('；'))
+                {
+                    string t = line.Trim();
+                    if (t.Length > 0)
+                        LogLine(t + "；", UiTheme.TextSub);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogLine("断开异常（" + ex.GetType().Name + "）：" + ex.Message, UiTheme.Warn);
+                UpdateBleConnUi(false);
+            }
+        }
+
+        // ---------- 蓝牙语音（第二步）：0xFFF0/0xB03E mSBC → PCM → 翻译管线 ----------
+        // 与 SDK 口径对齐（vendor/user/voice_dec/ux_voice_dec.c）：鼠标每 7.5ms 推一帧 57B mSBC，
+        // 解出 120 样本（240B）16kHz/mono/16bit PCM；notify 边界即帧边界（MTU 158 下单帧不分片）。
+        // 音源二选一：本路径启用时 USB 采集必须停（UpdateButtons 已把【开始采集】/设备下拉禁用），
+        // 反之 USB 采声中点【启用语音】会被拒并提示，不会出现两个音源同时喂 VAD。
+
+        /// <summary>【启用语音】：订阅 0xB03E notify，把蓝牙语音设为当前音源。</summary>
+        private async void OnBleVoiceOn(object sender, EventArgs e)
+        {
+            if (_bleVoiceActive)
+                return;
+            if (!_ble.IsLinkVerified)
+            {
+                LogLine("BLE 未连接（或活性校验未过），无法启用语音。", UiTheme.Danger);
+                return;
+            }
+            if (_running)
+            {
+                LogLine("USB 音频采集中：输入源二选一，请先点【停止采集】再启用蓝牙语音。", UiTheme.Warn);
+                return;
+            }
+
+            string err = await _ble.StartVoiceAsync();
+            if (err != null)
+            {
+                LogLine("启用蓝牙语音失败：" + err, UiTheme.Danger);
+                return;
+            }
+            StartBleVoiceSync();
+        }
+
+        /// <summary>【停用语音】：与【停止采集】同一条收尾路径（录音模式下照样送模型）。</summary>
+        private void OnBleVoiceOff(object sender, EventArgs e)
+        {
+            if (!_bleVoiceActive)
+                return;
+            OnStop(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// 启用蓝牙语音（同步部分）：重置解码器会话状态 → 接管 _running → 挂 VAD 事件。
+        /// 与 OnStart 的 USB 分支完全对称，保证两种音源走同一条 VAD/字幕/录音管线。
+        /// </summary>
+        private void StartBleVoiceSync()
+        {
+            _msbc.Reset();               // 新会话：合成滤波器历史(V)/offset 清零，否则音质撕裂
+            _bleVoiceActive = true;
+            _bleVoiceFrames = 0;
+            _bleVoiceErr = 0;
+            _lastRms = 0f;
+            _lastRecSec = 0;
+            _lastRecUiSec = 0;
+            lock (_recGate)
+            {
+                _recBuf.Clear();
+                _recBytes = 0;
+            }
+
+            bool rt = IsRealtime();
+            _running = true;
+            _vad.LevelUpdated += OnLevelUpdated;          // 两种模式都用它刷电平条
+            _vad.Reset();
+            if (rt)
+                _vad.SegmentReady += OnSegmentReady;      // 只有实时模式才自动断句
+
+            UpdateButtons();
+            UpdateBleConnUi(true);
+            LogLine("蓝牙语音已启用：mSBC(57B/帧, 7.5ms) → 120 样本 PCM → 翻译管线"
+                  + "（与 USB 音频二选一）。对鼠标说话试试。", UiTheme.Success);
+        }
+
+        /// <summary>
+        /// 停用蓝牙语音（同步收尾，不写 CCCD）：解 VAD 事件、清队列、恢复 _running=false。
+        /// CCCD 退订由调用方异步补（<see cref="BleDirectLink.StopVoiceAsync"/>）。
+        /// 录音缓冲不清空——调用方随后可按 USB 同款逻辑决定是否送模型。
+        /// </summary>
+        private void StopBleVoiceSync(string reason)
+        {
+            if (!_bleVoiceActive)
+                return;
+            _bleVoiceActive = false;
+            _running = false;
+            _vad.SegmentReady -= OnSegmentReady;
+            _vad.LevelUpdated -= OnLevelUpdated;
+            lock (_queueGate)
+            {
+                _pendingPcm.Clear();
+                _pendingSec.Clear();
+            }
+            SetLevelUi(0f);
+            UpdateButtons();
+            // 刷新语音按钮可用态与状态行（从 UpdateBleConnUi(false) 进来时二次进入无副作用：
+            // 此时 _bleVoiceActive 已为 false，不会再次走收尾逻辑）。
+            UpdateBleConnUi(_uiBleConnected);
+            LogLine("蓝牙语音已停用（" + reason + "）：本段共入管 " + _bleVoiceFrames + " 帧 PCM"
+                  + (_bleVoiceErr > 0 ? "，丢弃异常帧 " + _bleVoiceErr + " 个" : "") + "。", UiTheme.TextSub);
+        }
+
+        /// <summary>
+        /// 语音 notify 回调（WinRT 线程池线程）：每帧 57B mSBC → 240B PCM → OnAudioData。
+        /// 长度≠57 = 链路/MTU 异常（帧边界即 notify 边界，不存在跨 notify 分片），
+        /// 丢弃并计数，等下一个 notify 自然重新对齐。
+        /// </summary>
+        private void OnBleVoiceFrame(byte[] data)
+        {
+            if (data == null || data.Length == 0)
+                return;
+            if (!_bleVoiceActive || !_running)
+                return;                      // 未启用 / USB 采集中：直接丢弃，不解码
+
+            if (data.Length != MsbcDecoder.FrameLen)
+            {
+                _bleVoiceErr++;
+                LogVoiceErr("语音帧长度异常：" + data.Length + "B（期望 57B，疑似 MTU 未协商到 158），丢弃");
+                return;
+            }
+
+            byte[] pcm = new byte[MsbcDecoder.PcmBytesPerFrame];
+            if (!_msbc.TryDecodeFrame(data, 0, pcm, 0))
+            {
+                _bleVoiceErr++;
+                LogVoiceErr("mSBC 帧解码失败（sync 0xAD 或 CRC8 不符），丢弃该帧");
+                return;
+            }
+
+            _bleVoiceFrames++;
+            if (_bleVoiceFrames == 1)
+                LogLine("收到首个蓝牙语音帧并解码成功（57B → 240B PCM @16kHz/mono）。", UiTheme.Success);
+
+            OnAudioData(pcm);   // 与 USB 采集同一入口：VAD 电平/断句/录音缓冲全复用
+        }
+
+        /// <summary>语音异常限流日志：前 3 次 + 之后每 100 次记一条（7.5ms 一帧，不刷屏）。</summary>
+        private void LogVoiceErr(string msg)
+        {
+            if (_bleVoiceErr <= 3 || _bleVoiceErr % 100 == 0)
+                LogLine(msg + "（第 " + _bleVoiceErr + " 次）", UiTheme.Warn);
         }
 
         // ---------- UI 构建 ----------
@@ -255,7 +907,7 @@ namespace BibooUxTool
             _cardAudio = cardAudio;
             cardAudio.SetBounds(12, 12, ContentDesignWidth - 24, AudioCardHeight);
             cardAudio.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-            cardAudio.Controls.Add(MakeTitle("音频输入（USB Audio / 麦克风）"));
+            cardAudio.Controls.Add(MakeTitle("音频输入（USB Audio / 蓝牙语音 · 二选一）"));
 
             var lblDev = new Label();
             lblDev.Text = "设备";
@@ -406,6 +1058,73 @@ namespace BibooUxTool
                 _chkSpeak, lblSid, _numSid, lblOut, _cmbOut, _btnTestTts, _lblTts,
                 _chkPtt, _lblPtt });
             _contentCards.Add(cardAudio);
+
+            // 卡1b：蓝牙输入（BLE 直连 · 配对连接）
+            // 布局与交互照抄「固件升级」页 BLE Direct 子面板：模式按钮 + 状态行 + 设备列表 + 连接/断开。
+            // 第二步已落地：【启用语音】订阅 0xFFF0/0xB03E → 57B mSBC 帧 → MsbcDecoder → 240B PCM
+            // → OnAudioData 进现有 VAD/识别/翻译管线（与 USB Audio 二选一）。
+            var cardBle = new RoundedPanel();
+            _cardBle = cardBle;
+            cardBle.SetBounds(12, 228, ContentDesignWidth - 24, BleCardHeight);
+            cardBle.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            cardBle.Controls.Add(MakeTitle("蓝牙输入（BLE 直连 · 配对连接）"));
+
+            _btnBleModePaired = MakeBleButton("已配对设备", 16, 34, 96, 26, true, OnBleModePaired);
+            _btnBleModeScan = MakeBleButton("扫描附近", 116, 34, 96, 26, false, OnBleModeScan);
+            _btnBleRefresh = MakeBleButton("刷新", 216, 34, 60, 26, false, OnBleRefresh);
+            _btnBleSysPair = MakeBleButton("系统配对", 280, 34, 88, 26, false, OnBleSysPair);
+
+            _lblBleState = new Label();
+            _lblBleState.Text = "○ 未连接";
+            _lblBleState.ForeColor = UiTheme.TextSub;
+            _lblBleState.SetBounds(16, 62, ContentDesignWidth - 56, 18);
+            _lblBleState.AutoSize = false;
+            _lblBleState.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _lblBleState.TextAlign = ContentAlignment.MiddleLeft;
+
+            _lstBle = new ListBox();
+            _lstBle.SetBounds(16, 84, 540, 84);
+            _lstBle.Font = new Font("Consolas", 9f);
+            _lstBle.BackColor = UiTheme.InputBg;
+            _lstBle.ForeColor = UiTheme.TextMain;
+            _lstBle.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            _lstBle.SelectedIndexChanged += delegate { UpdateBleConnUi(_uiBleConnected); };
+            _lstBle.DoubleClick += OnBleListDoubleClick;
+
+            // 右侧按钮列统一右锚定：窗口拉宽时整列跟随右移，不与列表框相交
+            _btnBleConnect = MakeBleButton("连接", 566, 84, 96, 28, true, OnBleConnect);
+            _btnBleConnect.Enabled = false;
+            _btnBleConnect.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnBleDisconnect = MakeBleButton("断开", 566, 116, 96, 28, false, OnBleDisconnect);
+            _btnBleDisconnect.Enabled = false;
+            _btnBleDisconnect.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+
+            // 语音开关（第二步）：订阅/退订 0xB03E notify。与 USB 音频采集二选一 ——
+            // 启用中【开始采集】与设备下拉一律禁用；USB 采集中【启用语音】点了会被拒并提示。
+            _btnBleVoiceOn = MakeBleButton("启用语音", 566, 148, 96, 26, true, OnBleVoiceOn);
+            _btnBleVoiceOn.Enabled = false;
+            _btnBleVoiceOn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _btnBleVoiceOff = MakeBleButton("停用语音", 566, 178, 96, 26, false, OnBleVoiceOff);
+            _btnBleVoiceOff.Enabled = false;
+            _btnBleVoiceOff.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+
+            cardBle.Controls.AddRange(new Control[] {
+                _btnBleModePaired, _btnBleModeScan, _btnBleRefresh, _btnBleSysPair,
+                _lblBleState, _lstBle, _btnBleConnect, _btnBleDisconnect,
+                _btnBleVoiceOn, _btnBleVoiceOff });
+            _contentCards.Add(cardBle);
+
+            _ble.DeviceDiscovered += OnBleDiscovered;
+            _ble.ConnectionChanged += OnBleConnChanged;
+            _ble.PairedDeviceChanged += OnBlePairedChanged;
+            _ble.PairedWatchStateChanged += OnBlePairedWatchState;
+            _ble.ScanCompleted += OnBleScanCompleted;
+            _ble.VoiceReceived += OnBleVoiceFrame;   // 第二步：mSBC 帧 → PCM → 翻译管线
+
+            _bleLinkTimer = new System.Windows.Forms.Timer();
+            _bleLinkTimer.Interval = 2500;   // 与「蓝牙连接」页一致：2.5s 一次 ATT 活性读
+            _bleLinkTimer.Tick += OnBleLinkTimer;
+            _bleLinkTimer.Start();
 
             // 卡2：翻译引擎
             var cardEngine = new RoundedPanel();
@@ -577,7 +1296,7 @@ namespace BibooUxTool
             cardLog.Controls.SetChildIndex(_btnClearLog, 0);
             _contentCards.Add(cardLog);
 
-            Controls.AddRange(new Control[] { cardAudio, cardEngine, cardSub, cardLog });
+            Controls.AddRange(new Control[] { cardAudio, cardBle, cardEngine, cardSub, cardLog });
 
             LayoutContent();          // 按当前 ClientSize 归一化一次，避免首帧仍用设计坐标
             UpdateModeUi();
@@ -597,6 +1316,18 @@ namespace BibooUxTool
             return l;
         }
 
+        /// <summary>蓝牙输入卡的小按钮工厂（与 OtaForm.MakeButton 同款，仅尺寸/文案不同）。</summary>
+        private static GradientButton MakeBleButton(string text, int x, int y, int w, int h,
+                                                    bool primary, EventHandler onClick)
+        {
+            var b = new GradientButton();
+            b.SetBounds(x, y, w, h);
+            b.Text = text;
+            b.IsPrimary = primary;
+            b.Click += onClick;
+            return b;
+        }
+
         /// <summary>
         /// 内容列自适应：宽度铺满可用区（不再限制 ContentDesignWidth 上限——旧版限宽会让
         /// 最大化后卡片仍停在 756px，右侧大片留白），高度上把多余空间分给「实时字幕」与「日志」两卡。
@@ -614,6 +1345,11 @@ namespace BibooUxTool
             {
                 _cardAudio.SetBounds(CardMargin, y, availW, AudioCardHeight);
                 y += AudioCardHeight + CardGap;
+            }
+            if (_cardBle != null)
+            {
+                _cardBle.SetBounds(CardMargin, y, availW, BleCardHeight);
+                y += BleCardHeight + CardGap;
             }
             if (_cardEngine != null)
             {
@@ -1104,6 +1840,12 @@ namespace BibooUxTool
             if (IsDisposed || _chkPtt == null || !_chkPtt.Checked)
                 return;
 
+            if (_bleVoiceActive)
+            {
+                // 蓝牙语音正在采集（实时字幕/翻译已在跑）：语音键自动录音无须再插一层
+                LogLine("自动录音：蓝牙语音采集中，本次 Ctrl+Win 忽略（说完的话已在进字幕）。", UiTheme.Warn);
+                return;
+            }
             if (_running)
             {
                 LogLine("自动录音：已在录音中，忽略本次 Ctrl+Win。", UiTheme.Warn);
@@ -1257,6 +1999,13 @@ namespace BibooUxTool
 
         private void OnStart(object sender, EventArgs e)
         {
+            if (_bleVoiceActive)
+            {
+                // 二选一：蓝牙语音正在采集，USB 音频不能再同时开（否则两个音源都喂 VAD）
+                LogLine("蓝牙语音采集中：请先【停用语音】（或点【停止采集】）再启动 USB 音频。", UiTheme.Warn);
+                return;
+            }
+
             var dev = _cmbDevice.SelectedItem as AudioInputDevice;
             if (dev == null)
             {
@@ -1302,12 +2051,24 @@ namespace BibooUxTool
                 _tts.Stop();          // 停止采集时顺手打断正在念的译文
 
             bool rt = IsRealtime();
+            bool fromBle = _bleVoiceActive;   // 停的是哪个音源（二选一，二者不会同时为真）
             _running = false;
-            _capture.Stop();
-            _capture.DataAvailable -= OnAudioData;
-            _capture.Failed -= OnCaptureFailed;
-            _vad.SegmentReady -= OnSegmentReady;
-            _vad.LevelUpdated -= OnLevelUpdated;
+
+            if (fromBle)
+            {
+                // 停蓝牙语音：先退订 CCCD（鼠标不再推 mSBC），再同步收尾（解 VAD/清队列）。
+                // 录音模式下后面与 USB 路径走同一段「整段送模型」逻辑。
+                _ = StopBleVoiceWithCccdAsync();
+                StopBleVoiceSync("用户停止");
+            }
+            else
+            {
+                _capture.Stop();
+                _capture.DataAvailable -= OnAudioData;
+                _capture.Failed -= OnCaptureFailed;
+                _vad.SegmentReady -= OnSegmentReady;
+                _vad.LevelUpdated -= OnLevelUpdated;
+            }
             lock (_queueGate)
             {
                 _pendingPcm.Clear();
@@ -1318,11 +2079,32 @@ namespace BibooUxTool
             if (rt)
             {
                 UpdateButtons();
-                LogLine("已停止采集。", UiTheme.TextSub);
+                LogLine(fromBle ? "已停止蓝牙语音采集。" : "已停止采集。", UiTheme.TextSub);
                 return;
             }
 
-            // ---- 录音模式：把整段 PCM 一次送模型 ----
+            FlushRecordedSegment();
+        }
+
+        /// <summary>用户主动停用：退订语音 CCCD（幂等；失败只记日志，不影响本地收尾）。</summary>
+        private async Task StopBleVoiceWithCccdAsync()
+        {
+            try
+            {
+                string err = await _ble.StopVoiceAsync();
+                if (err != null)
+                    LogLine("退订语音 notify 未完全成功：" + err
+                          + "（本地已停止解码；鼠标侧最坏情况多推几帧，无副作用）", UiTheme.Warn);
+            }
+            catch (Exception ex)
+            {
+                LogLine("退订语音 notify 异常：" + ex.Message, UiTheme.Warn);
+            }
+        }
+
+        /// <summary>录音模式收尾：把累积的整段 PCM 一次送模型（USB 与蓝牙语音两条音源共用）。</summary>
+        private void FlushRecordedSegment()
+        {
             byte[] buf;
             lock (_recGate)
             {
@@ -1540,6 +2322,9 @@ namespace BibooUxTool
         {
             base.OnShown(e);
             _shown = true;
+            // 句柄就绪后再启「已配对设备」枚举（AEP watcher 在线程池线程回调，必须能 BeginInvoke 到 UI）
+            if (_blePairedMode)
+                _ble.StartPairedWatch();
             InitPttWatcher();      // 先挂监听：用户进页面后随时可以按 K5
             StartWarmup();
             // TTS 也一进页面就后台加载（2.8s）：等用户勾「朗读译文」再录完一句，
