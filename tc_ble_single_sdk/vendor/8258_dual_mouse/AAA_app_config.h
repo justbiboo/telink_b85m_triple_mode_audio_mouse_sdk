@@ -179,6 +179,19 @@ static inline void no_printf(const char *format, ...){    return;}
 #define BIBOO_UX_K4_SPACE_KEY	0
 #endif
 
+/* ================ BIBOO UX: K4 mouse button report (CANCELLED) ================ */
+/* K4 mouse-button reporting cancelled by product decision 2026-10-23: the
+ * raw key bit MS_BTN_K4 (0x08, host shows it as mouse side button #4) is
+ * stripped from the mouse report payload (ms_data.btn in btn_get_value).
+ * The bit is STILL kept in btn_value, so the BIBOO UX edge detector (PTT
+ * mic + SPP 0x23 frame) and the long-press gate keep working unchanged;
+ * only the report sent to the host drops it - ALL THREE modes (BLE / 2.4G /
+ * USB) share ms_data.btn, so none of them reports K4 any more.
+ * Set to 1 to restore the side-button reporting. */
+#ifndef BIBOO_UX_K4_MOUSE_BTN
+#define BIBOO_UX_K4_MOUSE_BTN	0
+#endif
+
 /* ================ BIBOO UX: K5 push-to-talk mic ================ */
 /* When enabled, the K5 (voice) button becomes a push-to-talk key (mic only,
  * NO HID keycode is sent):

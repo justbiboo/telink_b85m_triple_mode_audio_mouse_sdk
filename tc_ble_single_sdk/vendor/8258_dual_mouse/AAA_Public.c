@@ -1154,7 +1154,16 @@ u8 btn_get_value()
         if (debounce == 3)
         {
             ret = NEW_KEY_EVENT_AAA;
+#if (BIBOO_UX_K4_MOUSE_BTN)
             ms_data.btn = now_value & 0X1F;
+#else
+            /*BIBOO UX: K4 is the push-to-talk key now - keep its MS_BTN_K4 bit
+             *out of the mouse report (host would see a side-button click #4).
+             *The bit stays in btn_value below, so the BIBOO UX edge detector
+             *(PTT mic + SPP 0x23) and the long-press gate are unaffected.
+             *Set BIBOO_UX_K4_MOUSE_BTN=1 in AAA_app_config.h to restore.*/
+            ms_data.btn = (now_value & 0X1F) & ~MS_BTN_K4;
+#endif
 			//printf("the ms_data btn is %d\n",now_value);
 			if((now_value &0xff00)!= 0)
 			{
