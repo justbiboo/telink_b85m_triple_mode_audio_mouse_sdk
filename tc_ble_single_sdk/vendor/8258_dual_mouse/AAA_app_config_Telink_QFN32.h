@@ -57,7 +57,7 @@
     //-----------------------product function referance---------------------------------------
 
 	#define DEVICE_APPEARANCE      0X03C2// 0X0XC1 KEYBOARD 0X03C2 MOUSE
-    #define DEVICE_NAME_AAA   "Biboo_Auido"//"58_T_M"//58:8258  32: QFN32
+    #define DEVICE_NAME_AAA   "Biboo_Audio"//"58_T_M"//58:8258  32: QFN32
 
     // Firmware version - only change these two numbers, USER_BLE_VERSION_AAA is auto-generated
     // (BIBOO UX: ported from 8208 D21Pro_Tx_Origin mass-production; consumed by DevInf_aaa[]
